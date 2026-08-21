@@ -21,11 +21,21 @@ from typing import Optional, Sequence
 from .catalog import Catalog
 from .models import PipelineError
 from .naming import DEFAULT_NAMING_POLICY, NamingPolicy, auto_filename
+from .policy import (
+    DATE_PRECISION_DAY,
+    DATE_PRECISION_UNKNOWN,
+    date_range,
+    ranges_overlap,
+    supporting_filename,
+)
 from .state import LogicalDocumentRow
 from .textnorm import normalize
 from .writer import split_pages
 
 R_MISSING_RELIABLE_DATE = "ORDERING_MISSING_RELIABLE_DATE"
+# DEV POLICY CLOSURE (Policy 4): hai độ chính xác khác nhau mà khoảng ngày
+# chồng lấn - không được tự giả định thứ tự (section 11).
+R_ORDER_AMBIGUOUS = "ORDER_AMBIGUOUS"
 SAME_DATE_TIE_BREAK = "deterministic"  # ghi vào manifest theo yêu cầu Phase G
 
 
@@ -39,9 +49,15 @@ class NameableDoc:
     document_date: Optional[str]
     date_confidence: float
     title_short: Optional[str]
+    # Thêm sau (DEV POLICY CLOSURE) - đặt cuối + có default để không phá vỡ
+    # các lời gọi vị trí (positional) đã có trong test cũ.
+    date_precision: str = DATE_PRECISION_DAY
 
     @classmethod
     def from_row(cls, row: LogicalDocumentRow) -> "NameableDoc":
+        precision = row.effective_date_precision
+        if not precision:
+            precision = DATE_PRECISION_DAY if row.effective_document_date else DATE_PRECISION_UNKNOWN
         return cls(
             logical_document_id=row.logical_document_id,
             source_hash=row.source_hash,
@@ -49,6 +65,7 @@ class NameableDoc:
             document_date=row.effective_document_date,
             date_confidence=row.date_confidence,
             title_short=row.title_short,
+            date_precision=precision,
         )
 
 
@@ -67,11 +84,37 @@ def _sort_key(d: NameableDoc) -> tuple:
 def orderability_reasons(
     docs: Sequence[NameableDoc], policy: NamingPolicy = DEFAULT_NAMING_POLICY
 ) -> list[str]:
+    """Rỗng <=> xếp được thứ tự toàn cục an toàn.
+
+    Hai lý do KHÔNG xếp được:
+      - thiếu ngày đáng tin cậy (như cũ);
+      - (Policy 4) hai tài liệu có khoảng ngày (theo precision DAY/MONTH/YEAR)
+        CHỒNG LẤN nhưng KHÔNG bằng nhau hệt - không biết ai trước ai sau, ví
+        dụ MONTH "2023-11" và DAY "2023-11-05". Khoảng bằng NHAU HỆT (cùng giá
+        trị, cùng precision) không phải ambiguous - đó là ca "trùng ngày",
+        xếp bằng tie-break xác định (Phase G), không cần REVIEW.
+    """
     reasons: list[str] = []
+    dated: list[tuple[NameableDoc, tuple]] = []
     for d in docs:
         if not d.document_date or d.date_confidence < policy.min_date_confidence:
             if R_MISSING_RELIABLE_DATE not in reasons:
                 reasons.append(R_MISSING_RELIABLE_DATE)
+            continue
+        rng = date_range(d.document_date, d.date_precision)
+        if rng is None:
+            if R_MISSING_RELIABLE_DATE not in reasons:
+                reasons.append(R_MISSING_RELIABLE_DATE)
+            continue
+        dated.append((d, rng))
+    for i in range(len(dated)):
+        _, r1 = dated[i]
+        for j in range(i + 1, len(dated)):
+            _, r2 = dated[j]
+            if r1 == r2:
+                continue
+            if ranges_overlap(r1, r2) and R_ORDER_AMBIGUOUS not in reasons:
+                reasons.append(R_ORDER_AMBIGUOUS)
     return reasons
 
 
@@ -107,6 +150,26 @@ def compute_global_assignment(
         for idx, d in enumerate(ordered, start=1)
     ]
     return out, []
+
+
+def compute_supporting_assignment(docs: Sequence[NameableDoc]) -> list[GlobalAssignment]:
+    """Đánh số cho SUPPORTING_DOCUMENT cùng tiêu đề (Policy 2/5).
+
+    KHÁC với TAXONOMY: không yêu cầu ngày (nhiều tài liệu ngoài danh mục
+    không có ngày đáng tin cậy) - luôn xếp được bằng tie-break xác định
+    (title chuẩn hoá -> source_hash -> source_pages), không phải thứ tự thời
+    gian. Gọi riêng cho từng nhóm cùng `supporting_group_key` (cùng tiêu đề
+    chuẩn hoá) - nhóm khác tiêu đề không cạnh tranh số thứ tự với nhau."""
+    if not docs:
+        return []
+    ordered = sorted(docs, key=_tie_break_key)
+    if len(ordered) == 1:
+        only = ordered[0]
+        return [GlobalAssignment(only.logical_document_id, None, supporting_filename(only.title_short))]
+    return [
+        GlobalAssignment(d.logical_document_id, idx, supporting_filename(d.title_short, idx))
+        for idx, d in enumerate(ordered, start=1)
+    ]
 
 
 # ---------------------------------------------------------------------------

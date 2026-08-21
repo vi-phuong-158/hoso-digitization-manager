@@ -41,7 +41,9 @@ python -m app.cli process "input/<TEN_NGUOI>" --apply
 | `process "<thư mục>" --no-state` | Tắt incremental — xử lý lại TOÀN BỘ nguồn như trước khi có state registry. |
 | `process "<thư mục>" --json` | In manifest JSON thay vì summary. |
 | `review-list "<thư mục>"` | Liệt kê logical document đang REVIEW_PENDING (loại, ngày, lý do). |
-| `resolve-review <id> --type-id <mã> [--date yyyy-mm-dd]` | Chốt một logical document REVIEW_PENDING. KHÔNG đọc lại PDF. |
+| `resolve-review <id> --type-id <mã> [--subtype <mã>] [--date yyyy-mm-dd] [--date-precision DAY\|MONTH\|YEAR]` | Chốt TAXONOMY (vd type 87 + subtype quyết định nhân sự). KHÔNG đọc lại PDF. |
+| `resolve-review <id> --supporting` | Chốt là `SUPPORTING_DOCUMENT` (ngoài danh mục 104 loại). |
+| `resolve-review <id> --duplicate-of <id gốc>` | Chốt là `DUPLICATE` của một logical document đã biết — không tạo output riêng. |
 | `reconcile "<thư mục>"` | Đối chiếu state DB với file thật trên đĩa; báo STATE_OUTPUT_MISMATCH/orphan, không tự sửa. |
 | `inventory "<thư mục>"` | Liệt kê file nguồn + số trang + SHA-256 (không liên quan state). |
 | `import-state "<thư mục>"` | Nạp lại state PROCESSED từ manifest/output đã có sẵn (hồ sơ xử lý trước khi có state registry — xem mục "Migration" dưới). |
@@ -142,6 +144,25 @@ Thiếu file này thì pipeline dừng với thông báo rõ ràng; không có c
 Lưu ý: hai tài liệu cùng loại **trùng ngày** không còn là lý do REVIEW — global
 naming (mục dưới) tự xếp bằng tie-break xác định, không cần người vận hành can thiệp.
 
+## Bốn chính sách sau blind runtime test (DEV POLICY CLOSURE)
+
+- **Type 87 + subtype** — quyết định nhân sự (điều động/bố trí/bổ nhiệm/thăng
+  cấp bậc hàm/nâng bậc lương/nghỉ hưu) quy về `type_id=87`, kèm `subtype`
+  metadata phụ (không đổi tên file chính thức, không tạo type mới).
+- **SUPPORTING_DOCUMENT** — tài liệu ngoài danh mục 104 loại, người vận hành
+  xác nhận bằng `resolve-review ... --supporting`. Tên file
+  `SUPPORTING.<Ten_tai_lieu>.pdf` (hoặc `.N.pdf` nếu trùng tiêu đề) — không
+  dùng STT 01-104 giả.
+- **DUPLICATE** — bản scan trùng, xác nhận bằng
+  `resolve-review ... --duplicate-of <id>`. Không xóa/mutate nguồn, không tạo
+  output thứ hai. Nghi ngờ chưa chắc → vẫn REVIEW.
+- **Partial date precision** — `document_date` có thể chỉ ở mức MONTH/YEAR
+  (`date_precision`), không tự bịa ngày đầy đủ. Hai tài liệu có khoảng ngày
+  chồng lấn nhưng không bằng nhau hệt (theo precision) → `ORDER_AMBIGUOUS`,
+  vẫn REVIEW, không tự đoán thứ tự.
+
+Chi tiết đầy đủ: `.agents/rules/party-record-digitization.md` mục 9.
+
 ## Apply lại nhiều lần
 
 - Không có gì mới/thay đổi: 0 thao tác ghi/đổi tên, không tạo bản trùng, không đụng mtime file.
@@ -157,6 +178,9 @@ naming (mục dưới) tự xếp bằng tie-break xác định, không cần ng
 - tự tạo taxonomy mới;
 - tự đặt tên file / đánh số `.1/.2`, tự đổi chính sách global naming/tie-break;
 - tự resolve một logical document REVIEW_PENDING thay người vận hành;
+- tự gán `subtype` type 87, tự chuyển UNKNOWN sang SUPPORTING_DOCUMENT, tự xác
+  nhận DUPLICATE khi chưa có bằng chứng deterministic, tự bịa ngày đầy đủ khi
+  chỉ đọc được tháng/năm;
 - đọc lại (Vision) nguồn đã có cache hợp lệ (PROCESSED hoặc fingerprint chưa đổi);
 - sửa/xóa/di chuyển input;
 - gửi tài liệu ra dịch vụ ngoài luồng đã được người vận hành phê duyệt.

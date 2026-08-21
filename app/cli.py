@@ -5,6 +5,10 @@
     python -m app.cli status "input/<TEN_NGUOI>"
     python -m app.cli review-list "input/<TEN_NGUOI>"
     python -m app.cli resolve-review <logical_document_id> --type-id 86 --date 2013-09-10
+    python -m app.cli resolve-review <logical_document_id> --type-id 87 --subtype promotion_salary
+    python -m app.cli resolve-review <logical_document_id> --supporting
+    python -m app.cli resolve-review <logical_document_id> --duplicate-of <logical_document_id_goc>
+    python -m app.cli resolve-review <logical_document_id> --date 2023-11 --date-precision MONTH
     python -m app.cli inventory "input/<TEN_NGUOI>"
     python -m app.cli import-state "input/<TEN_NGUOI>"
     python -m app.cli state-export
@@ -99,10 +103,11 @@ def print_summary(result: PipelineResult) -> None:
     pending = [d for d in docs if d.get("needs_review")]
     if settled:
         print("\n--- Đã có tên chính thức (output/) ---")
-        for d in sorted(settled, key=lambda x: (x["type_id"], x.get("sequence_index") or 0)):
+        for d in sorted(settled, key=lambda x: (x.get("type_id") or "", x.get("sequence_index") or 0)):
+            label = d.get("type_id") or d.get("classification_kind") or ""
             print(
                 f"  {d['source_file']} trang {d['source_pages']} -> "
-                f"[{d['type_id']}] {d['current_target_filename']} "
+                f"[{label}] {d['current_target_filename']} "
                 f"({d.get('resolution_status')}{', ngày ' + d['document_date'] if d.get('document_date') else ''})"
             )
     if pending:
@@ -225,9 +230,16 @@ def cmd_resolve_review(args: argparse.Namespace) -> int:
     with StateRegistry(ws.state_db_path) as registry:
         row = resolve_review(
             registry, catalog, args.logical_document_id,
-            type_id=args.type_id, document_date=args.date, resolved_by=args.by,
+            type_id=args.type_id, subtype=args.subtype, supporting=args.supporting,
+            duplicate_of=args.duplicate_of, document_date=args.date,
+            date_precision=args.date_precision, resolved_by=args.by,
         )
-    print(f"Đã chốt {row.logical_document_id}: type_id={row.effective_type_id} ngày={row.effective_document_date}")
+    print(
+        f"Đã chốt {row.logical_document_id}: kind={row.effective_classification_kind} "
+        f"type_id={row.effective_type_id if row.effective_classification_kind == 'TAXONOMY' else '(không áp dụng)'} "
+        f"subtype={row.effective_subtype} duplicate_of={row.duplicate_of} "
+        f"ngày={row.effective_document_date} (precision={row.effective_date_precision})"
+    )
     print("Chạy `process ... --apply` để ghi file thật với tên chính thức.")
     return EXIT_OK
 
@@ -348,8 +360,28 @@ def build_parser() -> argparse.ArgumentParser:
 
     sp = sub.add_parser("resolve-review", help="Chốt một logical document REVIEW_PENDING (không đọc lại PDF)")
     sp.add_argument("logical_document_id")
-    sp.add_argument("--type-id", required=True, dest="type_id", help="type_id đúng trong document_types.json")
-    sp.add_argument("--date", default=None, help="document_date yyyy-mm-dd (bỏ trống nếu không xác định được)")
+    sp.add_argument(
+        "--type-id", default=None, dest="type_id",
+        help="type_id đúng trong document_types.json (TAXONOMY - chỉ 1 trong --type-id/--supporting/--duplicate-of)",
+    )
+    sp.add_argument(
+        "--subtype", default=None,
+        help="Metadata phụ khi --type-id 87 (transfer/assignment/appointment/"
+        "professional_title_appointment/promotion_salary/retirement/other_personnel_decision)",
+    )
+    sp.add_argument(
+        "--supporting", action="store_true",
+        help="Chốt là SUPPORTING_DOCUMENT (ngoài danh mục 104 loại, không dùng STT giả)",
+    )
+    sp.add_argument(
+        "--duplicate-of", default=None, dest="duplicate_of",
+        help="logical_document_id của bản GỐC - chốt tài liệu này là DUPLICATE (không tạo output riêng)",
+    )
+    sp.add_argument("--date", default=None, help="document_date yyyy-mm-dd / yyyy-mm / yyyy (bỏ trống nếu không xác định được)")
+    sp.add_argument(
+        "--date-precision", default=None, dest="date_precision",
+        help="DAY/MONTH/YEAR - phải khớp định dạng --date (không tự bịa ngày/tháng)",
+    )
     sp.add_argument("--by", default="operator", help="Người chốt (ghi vào resolved_by)")
     sp.set_defaults(func=cmd_resolve_review)
 

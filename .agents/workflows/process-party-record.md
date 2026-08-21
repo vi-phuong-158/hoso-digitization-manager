@@ -119,11 +119,17 @@ Nếu manifest có logical document `needs_review: true`, liệt kê:
 python -m app.cli review-list "<thư mục>"
 ```
 
-Không tự chọn `type_id`/ngày thay người vận hành. Chờ họ chốt bằng:
+Không tự chọn `type_id`/`subtype`/supporting/duplicate/ngày thay người vận
+hành. Chờ họ chốt bằng một trong:
 
 ```
-python -m app.cli resolve-review <logical_document_id> --type-id <mã> [--date yyyy-mm-dd]
+python -m app.cli resolve-review <logical_document_id> --type-id <mã> [--subtype <mã>] [--date yyyy-mm-dd] [--date-precision DAY|MONTH|YEAR]
+python -m app.cli resolve-review <logical_document_id> --supporting
+python -m app.cli resolve-review <logical_document_id> --duplicate-of <logical_document_id gốc>
 ```
+
+(Xem `.agents/rules/party-record-digitization.md` mục 9 — chính sách type 87
+subtype / SUPPORTING_DOCUMENT / DUPLICATE / partial date precision.)
 
 ## Bước 9 — Dừng
 

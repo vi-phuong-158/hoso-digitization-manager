@@ -53,6 +53,15 @@ Muốn đổi logic/ngưỡng/taxonomy phải do người vận hành mở DEV m
 - **Tự resolve một logical document `REVIEW_PENDING`** thay người vận hành.
 - Sửa schema state DB (`app/state.py`) hoặc tự đổi chính sách global naming.
 - Renumber/apply khi người vận hành **chưa yêu cầu rõ**.
+- **Tự gán `subtype` cho type 87** vào state (chỉ người vận hành gõ `--subtype`
+  khi resolve-review) — Agent chỉ được GỢI Ý trong phần trình bày, không tự ghi.
+- **Tự chuyển UNKNOWN sang `SUPPORTING_DOCUMENT`** hoặc tự tạo type 105+ cho
+  tài liệu ngoài danh mục — chỉ được nêu đây là ứng viên supporting, chờ người
+  vận hành `resolve-review ... --supporting`.
+- **Tự xác nhận DUPLICATE** trừ khi có bằng chứng deterministic rất mạnh (hash
+  ảnh/trang giống hệt) — nghi ngờ mà chưa chắc thì giữ nguyên REVIEW.
+- **Tự bịa `document_date` đầy đủ** khi chỉ đọc được tháng/năm — phải ghi đúng
+  `date_precision` (MONTH/YEAR), không suy diễn ngày.
 
 **Gặp case lạ → `REVIEW_REQUIRED`. Không tự vá code.**
 
@@ -147,10 +156,15 @@ Báo cho người vận hành: số file, số trang, số logical document, AUT
 
 ```
 python -m app.cli review-list "input/<TEN_NGUOI>"
-python -m app.cli resolve-review <logical_document_id> --type-id <mã> [--date yyyy-mm-dd]
+python -m app.cli resolve-review <logical_document_id> --type-id <mã> [--subtype <mã>] [--date yyyy-mm-dd] [--date-precision DAY|MONTH|YEAR]
+python -m app.cli resolve-review <logical_document_id> --supporting
+python -m app.cli resolve-review <logical_document_id> --duplicate-of <logical_document_id gốc>
 ```
 
-Không tự chọn type/date thay người vận hành. Không cần đọc lại PDF ở bước này.
+Không tự chọn type/subtype/supporting/duplicate/date thay người vận hành —
+chỉ được GỢI Ý trong phần trình bày (vd "có vẻ là quyết định nhân sự, ứng viên
+type 87"; "ngoài danh mục, có thể là supporting"; "nghi trùng trang X"), luôn
+chờ người vận hành gõ lệnh thật. Không cần đọc lại PDF ở bước này.
 
 ### Bước 9 — Apply (chỉ khi được yêu cầu rõ)
 

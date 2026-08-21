@@ -29,6 +29,7 @@ from .global_naming import (
     SAME_DATE_TIE_BREAK,
     build_rename_plan,
     compute_global_assignment,
+    compute_supporting_assignment,
     execute_rename_plan,
     has_collisions,
 )
@@ -36,6 +37,12 @@ from .incremental import IncrementalScan, scan_person_folder
 from .manifest import build_manifest, load_manifest, save_manifest
 from .models import MODE_APPLY, MODE_DRY_RUN, ClassifiedDocument, PipelineError
 from .naming import DEFAULT_NAMING_POLICY, NamingPolicy, assign_names, review_filename
+from .policy import (
+    CLASSIFICATION_KIND_DUPLICATE,
+    CLASSIFICATION_KIND_SUPPORTING,
+    CLASSIFICATION_KIND_TAXONOMY,
+    supporting_group_key,
+)
 from .pdf_inventory import PersonInventory, SourceFile, build_inventory, verify_unchanged
 from .qc import QCReport, run_qc
 from .segmenter import (
@@ -305,6 +312,13 @@ def _to_cache_dict(cd: ClassifiedDocument) -> dict:
         "segmentation_flags": list(cd.document.segmentation_flags),
         "classification_status": cd.classification_status,
         "classification_reasons": list(cd.classification_reasons),
+        # DEV POLICY CLOSURE: phân tích lần đầu luôn là TAXONOMY thuần (Agent
+        # không được tự gán SUPPORTING/DUPLICATE - chỉ resolve-review mới có
+        # quyền đó). date_precision để None -> save_analysis tự suy DAY nếu có
+        # document_date, không suy MONTH/YEAR ở đây (không tự bịa từ Vision).
+        "classification_kind": CLASSIFICATION_KIND_TAXONOMY,
+        "subtype": None,
+        "date_precision": None,
     }
 
 
@@ -421,15 +435,21 @@ def _incremental_manifest(
     docs = []
     for row in state_registry.logical_documents_for_person(inventory.person_folder):
         src_state = state_registry.get(row.source_hash)
+        kind = row.effective_classification_kind
+        is_taxonomy = kind == CLASSIFICATION_KIND_TAXONOMY
         docs.append(
             {
                 "logical_document_id": row.logical_document_id,
                 "source_hash": row.source_hash,
                 "source_file": src_state.source_filename if src_state else None,
                 "source_pages": list(row.source_pages),
-                "type_id": row.effective_type_id,
-                "type_name_vi": catalog.name_vi(row.effective_type_id) if catalog.is_valid_classification(row.effective_type_id) and row.effective_type_id != "UNKNOWN" else None,
+                "classification_kind": kind,
+                "type_id": row.effective_type_id if is_taxonomy else None,
+                "type_name_vi": catalog.name_vi(row.effective_type_id) if is_taxonomy and catalog.is_valid_classification(row.effective_type_id) and row.effective_type_id != "UNKNOWN" else None,
+                "subtype": row.effective_subtype,
+                "duplicate_of": row.duplicate_of,
                 "document_date": row.effective_document_date,
+                "date_precision": row.effective_date_precision,
                 "title_short": row.title_short,
                 "resolution_status": row.resolution_status,
                 "current_target_filename": row.current_target_filename,
@@ -523,13 +543,21 @@ def _finish_apply(
             notes=notes or ["Không có nguồn mới cần xử lý."], incremental=scan, status_override="APPLY_PASS",
         )
 
-    # 1) Loại type_id "active" (xuất hiện trong logical document settled của
-    #    các nguồn được apply lượt này).
+    # 1) Loại type_id "active" TAXONOMY + nhóm SUPPORTING_DOCUMENT "active"
+    #    (xuất hiện trong logical document settled của các nguồn apply lượt
+    #    này). DUPLICATE (Policy 3) không bao giờ vào naming pool nào - không
+    #    tạo output riêng (`is_nameable`).
     active_types: set[str] = set()
+    active_supporting_keys: set[str] = set()
     for s in apply_sources:
         for row in state_registry.logical_documents_for(s.sha256):
-            if row.is_settled:
+            if not row.is_settled or not row.is_nameable:
+                continue
+            kind = row.effective_classification_kind
+            if kind == CLASSIFICATION_KIND_TAXONOMY:
                 active_types.add(row.effective_type_id)
+            elif kind == CLASSIFICATION_KIND_SUPPORTING:
+                active_supporting_keys.add(supporting_group_key(row.title_short))
 
     # 2) Global assignment (Phase F/G) + rename plan (Phase H/I) cho mỗi type -
     #    nhìn TOÀN BỘ hồ sơ người này, không chỉ apply_sources lượt này (vd
@@ -540,7 +568,8 @@ def _finish_apply(
     unorderable_types: set[str] = set()
     for type_id in sorted(active_types):
         rows = [
-            r for r in state_registry.logical_documents_for_person(person, type_id=type_id) if r.is_settled
+            r for r in state_registry.logical_documents_for_person(person, type_id=type_id)
+            if r.is_settled and r.is_nameable and r.effective_classification_kind == CLASSIFICATION_KIND_TAXONOMY
         ]
         nameable = [NameableDoc.from_row(r) for r in rows]
         assignment, reasons = compute_global_assignment(catalog, type_id, nameable, naming_policy)
@@ -557,6 +586,27 @@ def _finish_apply(
             for r in rows if r.current_target_filename
         }
         all_ops.extend(build_rename_plan(current, assignment))
+
+    # 2b) SUPPORTING_DOCUMENT (Policy 2/5) - nhóm theo TIÊU ĐỀ chuẩn hoá, không
+    #     theo type_id (không có type_id chính thức, không dùng STT 01-104
+    #     giả). Luôn xếp được (không cần ngày) - chỉ tie-break xác định.
+    if active_supporting_keys:
+        all_person_rows = state_registry.logical_documents_for_person(person)
+        for key in sorted(active_supporting_keys):
+            rows = [
+                r for r in all_person_rows
+                if r.is_settled and r.is_nameable
+                and r.effective_classification_kind == CLASSIFICATION_KIND_SUPPORTING
+                and supporting_group_key(r.title_short) == key
+            ]
+            nameable = [NameableDoc.from_row(r) for r in rows]
+            assignment = compute_supporting_assignment(nameable)
+            assignment_by_type[f"__supporting__:{key}"] = assignment
+            current = {
+                r.logical_document_id: (r.current_target_filename, r.target_dir)
+                for r in rows if r.current_target_filename
+            }
+            all_ops.extend(build_rename_plan(current, assignment))
 
     collisions = has_collisions(all_ops)
     if collisions:
@@ -637,7 +687,11 @@ def _finish_apply(
         for s in apply_sources:
             rows = state_registry.logical_documents_for(s.sha256)
             pending = [r for r in rows if r.resolution_status == "REVIEW_PENDING"]
-            all_settled_named = all(r.current_target_filename for r in rows if r.is_settled)
+            # DUPLICATE (Policy 3) không bao giờ có filename riêng - không tính
+            # vào điều kiện "đã có tên" (`is_nameable` = False cho DUPLICATE).
+            all_settled_named = all(
+                (not r.is_nameable) or r.current_target_filename for r in rows if r.is_settled
+            )
             if not pending and all_settled_named:
                 state_registry.commit_processed(
                     s.sha256, logical_document_count=len(rows), manifest_path=str(output_dir / "_manifest.json")

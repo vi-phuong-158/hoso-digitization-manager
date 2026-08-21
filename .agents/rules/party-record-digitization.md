@@ -144,10 +144,44 @@ Người vận hành chốt loại/ngày đúng — Agent **KHÔNG được tự
 vận hành**, chỉ được trình bày lựa chọn và chờ quyết định rõ ràng:
 
 ```
-python -m app.cli resolve-review <logical_document_id> --type-id <mã> [--date yyyy-mm-dd]
+python -m app.cli resolve-review <logical_document_id> --type-id <mã> [--subtype <mã>] [--date yyyy-mm-dd] [--date-precision DAY|MONTH|YEAR]
+python -m app.cli resolve-review <logical_document_id> --supporting
+python -m app.cli resolve-review <logical_document_id> --duplicate-of <logical_document_id gốc>
 ```
 
 Lệnh này KHÔNG đọc lại PDF — chỉ ghi quyết định vào state DB. Sau đó `process
 ... --apply` sẽ tính lại tên file (mục 4) và ghi file thật. Nguồn chỉ chuyển
 sang `PROCESSED` khi **mọi** logical document của nó đã được giải quyết (AUTO
 hoặc REVIEW đã resolve) **và** apply thành công **và** QC PASS.
+
+## 9. Bốn chính sách phát sinh sau blind runtime test (DEV POLICY CLOSURE)
+
+**Type 87 — quyết định nhân sự.** Điều động/bố trí/bổ nhiệm/thăng cấp bậc
+hàm/nâng bậc lương/nghỉ hưu **được phép** quy về `type_id = 87` kèm `subtype`
+metadata phụ (`transfer`/`assignment`/`appointment`/
+`professional_title_appointment`/`promotion_salary`/`retirement`/
+`other_personnel_decision`). `subtype` **không đổi filename chính thức** của
+type 87, không tạo taxonomy mới. Chỉ người vận hành mới gõ `--subtype` khi
+`resolve-review`; Agent không tự gán.
+
+**Supporting — ngoài danh mục 104 loại.** Không được tự ép vào type gần nhất,
+**không** tạo type 105+. Tài liệu `TYPE_UNKNOWN` chỉ chuyển sang
+`classification_kind = SUPPORTING_DOCUMENT` khi người vận hành xác nhận bằng
+`resolve-review ... --supporting`. Tên file dùng namespace riêng
+`SUPPORTING.<Ten_tai_lieu>.pdf` (hoặc `.N.pdf` nếu trùng tiêu đề) — **không**
+dùng số thứ tự 01–104 giả. Agent **không được tự AUTO** từ UNKNOWN sang
+SUPPORTING_DOCUMENT.
+
+**Duplicate — bản scan trùng.** Không xóa/mutate PDF nguồn. Chỉ đánh dấu
+`classification_kind = DUPLICATE` (kèm `duplicate_of` trỏ tới bản gốc) khi
+người vận hành xác nhận bằng `resolve-review ... --duplicate-of <id>`. Một
+tài liệu DUPLICATE **không bao giờ** có output riêng. Agent chỉ được tự AUTO
+duplicate nếu có bằng chứng deterministic rất mạnh (hash ảnh/trang giống hệt);
+nghi ngờ mà chưa chắc → giữ nguyên REVIEW, không tự đoán.
+
+**Partial date precision.** `document_date` có thể chỉ biết đến MONTH hoặc
+YEAR — không được tự bịa thành ngày đầy đủ. Ghi `date_precision`
+(`DAY`/`MONTH`/`YEAR`/`UNKNOWN`) đúng với độ chính xác đọc được. Naming engine
+so khoảng ngày (theo precision) để xếp thứ tự; nếu khoảng của hai tài liệu
+CHỒNG LẤN nhưng không bằng nhau hệt (vd MONTH "2023-11" và DAY "2023-11-05") →
+`ORDER_AMBIGUOUS`, không tự giả định ai trước ai sau.

@@ -40,7 +40,9 @@ input/<người>/*.pdf
 | `app/fingerprint.py` | Fingerprint cache (taxonomy + schema hợp đồng) — quyết định cache còn dùng được hay STALE |
 | `app/incremental.py` | Đối chiếu inventory + fingerprint với state registry -> NEW/STALE/CACHED/PROCESSED/... |
 | `app/global_naming.py` | Đặt tên `.1/.2/...` nhìn TOÀN BỘ hồ sơ (không chỉ lượt chạy) + rename plan 2 pha fail-safe |
-| `app/review.py` | `review-list`/`resolve-review` — người vận hành chốt REVIEW không cần Agent đọc lại PDF |
+| `app/policy.py` | DEV POLICY CLOSURE: type 87 subtype, SUPPORTING_DOCUMENT, DUPLICATE, partial date precision (DAY/MONTH/YEAR) |
+| `app/policy_rehearsal.py` | Rehearsal thuần dữ liệu (đọc manifest/analysis đã freeze) — preview AUTO/REVIEW trước/sau khi áp policy, không mutate state |
+| `app/review.py` | `review-list`/`resolve-review` — người vận hành chốt REVIEW (TAXONOMY/SUPPORTING/DUPLICATE/ngày) không cần Agent đọc lại PDF |
 | `app/reconcile.py` | Đối chiếu state DB với file thật trên đĩa (`reconcile`), chỉ báo cáo |
 | `app/state_import.py` | Migration: nạp PROCESSED từ manifest/output đã có sẵn (`import-state`) |
 | `app/cli.py` | CLI |

@@ -27,6 +27,12 @@ from typing import Optional
 
 from . import __version__ as PIPELINE_VERSION
 from .models import PipelineError
+from .policy import (
+    CLASSIFICATION_KIND_DUPLICATE,
+    CLASSIFICATION_KIND_TAXONOMY,
+    CLASSIFICATION_KINDS,
+    DATE_PRECISIONS,
+)
 
 DB_FILENAME = "processing_state.db"
 
@@ -116,6 +122,14 @@ class LogicalDocumentRow:
     sequence_index: Optional[int]
     created_at: str
     updated_at: str
+    # --- DEV POLICY CLOSURE: type 87 subtype / supporting / duplicate / partial date ---
+    classification_kind: str  # TAXONOMY | SUPPORTING_DOCUMENT | DUPLICATE (lúc phân tích)
+    subtype: Optional[str]  # metadata phụ khi type_id == "87" (không đổi filename)
+    date_precision: Optional[str]  # DAY | MONTH | YEAR | UNKNOWN (lúc phân tích)
+    duplicate_of: Optional[str]  # logical_document_id bị trùng, chỉ có khi kind=DUPLICATE
+    resolved_classification_kind: Optional[str]
+    resolved_subtype: Optional[str]
+    resolved_date_precision: Optional[str]
 
     @property
     def effective_type_id(self) -> str:
@@ -126,9 +140,26 @@ class LogicalDocumentRow:
         return self.resolved_document_date or self.document_date
 
     @property
+    def effective_date_precision(self) -> Optional[str]:
+        return self.resolved_date_precision or self.date_precision
+
+    @property
+    def effective_classification_kind(self) -> str:
+        return self.resolved_classification_kind or self.classification_kind
+
+    @property
+    def effective_subtype(self) -> Optional[str]:
+        return self.resolved_subtype or self.subtype
+
+    @property
     def is_settled(self) -> bool:
         """Đã có filename chính thức được không (không còn REVIEW_PENDING)."""
         return self.resolution_status != RESOLUTION_REVIEW_PENDING
+
+    @property
+    def is_nameable(self) -> bool:
+        """DUPLICATE không bao giờ có output riêng - loại khỏi mọi naming pool."""
+        return self.effective_classification_kind != CLASSIFICATION_KIND_DUPLICATE
 
     def as_dict(self) -> dict:
         d = {f.name: getattr(self, f.name) for f in fields(self)}
@@ -160,6 +191,7 @@ class StateRegistry:
         self._conn.execute("PRAGMA synchronous=FULL")
         self._conn.execute("PRAGMA foreign_keys=ON")
         self._init_schema()
+        self._migrate_schema()
 
     def close(self) -> None:
         self._conn.close()
@@ -223,13 +255,42 @@ class StateRegistry:
                     target_dir TEXT,
                     sequence_index INTEGER,
                     created_at TEXT NOT NULL,
-                    updated_at TEXT NOT NULL
+                    updated_at TEXT NOT NULL,
+                    classification_kind TEXT NOT NULL DEFAULT 'TAXONOMY',
+                    subtype TEXT,
+                    date_precision TEXT,
+                    duplicate_of TEXT,
+                    resolved_classification_kind TEXT,
+                    resolved_subtype TEXT,
+                    resolved_date_precision TEXT
                 )
                 """
             )
             self._conn.execute(
                 "CREATE INDEX IF NOT EXISTS idx_logdocs_source ON logical_documents(source_hash)"
             )
+
+    # Cột thêm sau bản gốc (Phase 30 - DEV POLICY CLOSURE). ALTER TABLE ADD COLUMN
+    # thay vì CREATE lại, để không đụng dữ liệu sẵn có (section 14: migration
+    # backward compatible, không xoá state hiện có, transactional).
+    _LOGICAL_DOC_NEW_COLUMNS: tuple[tuple[str, str], ...] = (
+        ("classification_kind", "TEXT NOT NULL DEFAULT 'TAXONOMY'"),
+        ("subtype", "TEXT"),
+        ("date_precision", "TEXT"),
+        ("duplicate_of", "TEXT"),
+        ("resolved_classification_kind", "TEXT"),
+        ("resolved_subtype", "TEXT"),
+        ("resolved_date_precision", "TEXT"),
+    )
+
+    def _migrate_schema(self) -> None:
+        existing = {
+            r["name"] for r in self._conn.execute("PRAGMA table_info(logical_documents)").fetchall()
+        }
+        with self._conn:
+            for name, decl in self._LOGICAL_DOC_NEW_COLUMNS:
+                if name not in existing:
+                    self._conn.execute(f"ALTER TABLE logical_documents ADD COLUMN {name} {decl}")
 
     # ================= sources: truy vấn (read-only) =================
     def get(self, source_hash: str) -> Optional[SourceState]:
@@ -326,7 +387,11 @@ class StateRegistry:
 
         Mỗi dict trong `documents` cần các khoá: source_pages, type_id, confidence,
         document_date, date_confidence, title_short, segmentation_flags,
-        classification_status ("AUTO"/"REVIEW"), classification_reasons.
+        classification_status ("AUTO"/"REVIEW"), classification_reasons. Tuỳ chọn
+        (DEV POLICY CLOSURE): classification_kind (mặc định TAXONOMY), subtype
+        (mặc định None), date_precision (mặc định DAY nếu có document_date, None
+        nếu không - không tự suy "MONTH"/"YEAR" tại đây, việc đó là của
+        resolve-review vì cần người xác nhận thứ đã đọc từ notes).
         """
         has_review = any(d["classification_status"] == "REVIEW" for d in documents)
         status = STATUS_REVIEW_REQUIRED if has_review else STATUS_ANALYZED_PENDING_APPLY
@@ -355,6 +420,14 @@ class StateRegistry:
                 title = (d.get("title_short") or None)
                 if title and len(title) > _MAX_TITLE_LEN:
                     title = title[:_MAX_TITLE_LEN]
+                classification_kind = d.get("classification_kind") or CLASSIFICATION_KIND_TAXONOMY
+                if classification_kind not in CLASSIFICATION_KINDS:
+                    raise PipelineError(f"classification_kind không hợp lệ: {classification_kind!r}")
+                date_precision = d.get("date_precision")
+                if date_precision is None and d.get("document_date"):
+                    date_precision = "DAY"  # mặc định lùi tương thích: caller cũ không khai precision
+                if date_precision is not None and date_precision not in DATE_PRECISIONS:
+                    raise PipelineError(f"date_precision không hợp lệ: {date_precision!r}")
                 self._conn.execute(
                     """
                     INSERT INTO logical_documents (
@@ -363,8 +436,11 @@ class StateRegistry:
                         classification_status, classification_reasons, resolution_status,
                         resolved_type_id, resolved_document_date, resolved_by, resolved_at,
                         current_target_filename, target_dir, sequence_index,
-                        created_at, updated_at
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, NULL, NULL, NULL, NULL, NULL, NULL, ?, ?)
+                        created_at, updated_at, classification_kind, subtype, date_precision,
+                        duplicate_of, resolved_classification_kind, resolved_subtype,
+                        resolved_date_precision
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, NULL, NULL, NULL, NULL, NULL, NULL,
+                        ?, ?, ?, ?, ?, NULL, NULL, NULL, NULL)
                     """,
                     (
                         lid, source_hash, json.dumps(d["source_pages"]), d["type_id"],
@@ -373,7 +449,7 @@ class StateRegistry:
                         json.dumps(d.get("segmentation_flags") or []),
                         d["classification_status"], json.dumps(d.get("classification_reasons") or []),
                         RESOLUTION_REVIEW_PENDING if is_review else RESOLUTION_AUTO_RESOLVED,
-                        ts, ts,
+                        ts, ts, classification_kind, d.get("subtype"), date_precision,
                     ),
                 )
 
@@ -439,24 +515,41 @@ class StateRegistry:
         self,
         logical_document_id_: str,
         *,
-        resolved_type_id: str,
-        resolved_document_date: Optional[str],
         resolved_by: str,
+        resolved_classification_kind: Optional[str] = None,
+        resolved_type_id: Optional[str] = None,
+        resolved_subtype: Optional[str] = None,
+        resolved_document_date: Optional[str] = None,
+        resolved_date_precision: Optional[str] = None,
+        duplicate_of: Optional[str] = None,
     ) -> None:
         """Người vận hành chốt một logical document đang REVIEW_PENDING.
 
-        Chỉ đổi resolution_status; KHÔNG tự động ghi file — apply lần sau sẽ
-        tính lại global naming và ghi file thật (Phase E)."""
+        `resolved_classification_kind` mặc định giữ TAXONOMY (chỉ đổi type_id/
+        ngày). DEV POLICY CLOSURE: có thể chốt sang SUPPORTING_DOCUMENT (không
+        type_id) hoặc DUPLICATE (kèm `duplicate_of`). Validate nghiệp vụ (type_id
+        hợp lệ, duplicate_of tồn tại...) là việc của app/review.py - hàm này chỉ
+        ghi, KHÔNG tự động ghi file (apply lần sau tính lại naming - Phase E)."""
+        kind = resolved_classification_kind or CLASSIFICATION_KIND_TAXONOMY
+        if kind not in CLASSIFICATION_KINDS:
+            raise PipelineError(f"resolved_classification_kind không hợp lệ: {kind!r}")
+        if resolved_date_precision is not None and resolved_date_precision not in DATE_PRECISIONS:
+            raise PipelineError(f"resolved_date_precision không hợp lệ: {resolved_date_precision!r}")
         ts = _now()
         with self._conn:
             cur = self._conn.execute(
                 """
                 UPDATE logical_documents SET
-                    resolution_status = 'REVIEW_RESOLVED', resolved_type_id = ?,
-                    resolved_document_date = ?, resolved_by = ?, resolved_at = ?, updated_at = ?
+                    resolution_status = 'REVIEW_RESOLVED',
+                    resolved_classification_kind = ?, resolved_type_id = ?, resolved_subtype = ?,
+                    resolved_document_date = ?, resolved_date_precision = ?, duplicate_of = ?,
+                    resolved_by = ?, resolved_at = ?, updated_at = ?
                 WHERE logical_document_id = ? AND resolution_status = 'REVIEW_PENDING'
                 """,
-                (resolved_type_id, resolved_document_date, resolved_by, ts, ts, logical_document_id_),
+                (
+                    kind, resolved_type_id, resolved_subtype, resolved_document_date,
+                    resolved_date_precision, duplicate_of, resolved_by, ts, ts, logical_document_id_,
+                ),
             )
             if cur.rowcount != 1:
                 raise PipelineError(
