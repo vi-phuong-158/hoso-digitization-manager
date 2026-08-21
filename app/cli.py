@@ -380,7 +380,7 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("--date", default=None, help="document_date yyyy-mm-dd / yyyy-mm / yyyy (bỏ trống nếu không xác định được)")
     sp.add_argument(
         "--date-precision", default=None, dest="date_precision",
-        help="DAY/MONTH/YEAR - phải khớp định dạng --date (không tự bịa ngày/tháng)",
+        help="DAY/MONTH/YEAR/UNKNOWN - phải khớp --date (UNKNOWN dùng khi --date bỏ trống)",
     )
     sp.add_argument("--by", default="operator", help="Người chốt (ghi vào resolved_by)")
     sp.set_defaults(func=cmd_resolve_review)

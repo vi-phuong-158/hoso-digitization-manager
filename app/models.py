@@ -142,6 +142,15 @@ class ClassifiedDocument:
     target_dir: Optional[str] = None  # "output" | "review"
     sequence_index: Optional[int] = None
 
+    # Policy metadata carried by the standard (non-incremental) manifest too.
+    # Runtime analysis defaults to TAXONOMY; human-resolved state can expose
+    # SUPPORTING_DOCUMENT/DUPLICATE through the incremental manifest path.
+    logical_document_id: Optional[str] = None
+    classification_kind: str = "TAXONOMY"
+    subtype: Optional[str] = None
+    date_precision: Optional[str] = None
+    duplicate_of: Optional[str] = None
+
     @property
     def needs_review(self) -> bool:
         return self.final_status == "REVIEW"

@@ -32,9 +32,12 @@ from .policy import (
     CLASSIFICATION_KIND_TAXONOMY,
     CLASSIFICATION_KINDS,
     DATE_PRECISIONS,
+    DATE_PRECISION_UNKNOWN,
+    validate_classification_metadata,
 )
 
 DB_FILENAME = "processing_state.db"
+STATE_SCHEMA_VERSION = 2
 
 STATUS_PROCESSING = "PROCESSING"
 STATUS_ANALYZED_PENDING_APPLY = "ANALYZED_PENDING_APPLY"
@@ -141,7 +144,7 @@ class LogicalDocumentRow:
 
     @property
     def effective_date_precision(self) -> Optional[str]:
-        return self.resolved_date_precision or self.date_precision
+        return self.resolved_date_precision or self.date_precision or DATE_PRECISION_UNKNOWN
 
     @property
     def effective_classification_kind(self) -> str:
@@ -166,6 +169,8 @@ class LogicalDocumentRow:
         d["source_pages"] = list(self.source_pages)
         d["segmentation_flags"] = list(self.segmentation_flags)
         d["classification_reasons"] = list(self.classification_reasons)
+        d["date_precision"] = d["date_precision"] or DATE_PRECISION_UNKNOWN
+        d["resolved_date_precision"] = d["resolved_date_precision"] or DATE_PRECISION_UNKNOWN
         return d
 
 
@@ -269,6 +274,9 @@ class StateRegistry:
             self._conn.execute(
                 "CREATE INDEX IF NOT EXISTS idx_logdocs_source ON logical_documents(source_hash)"
             )
+            self._conn.execute(
+                "CREATE TABLE IF NOT EXISTS state_schema (key TEXT PRIMARY KEY, value TEXT NOT NULL)"
+            )
 
     # Cột thêm sau bản gốc (Phase 30 - DEV POLICY CLOSURE). ALTER TABLE ADD COLUMN
     # thay vì CREATE lại, để không đụng dữ liệu sẵn có (section 14: migration
@@ -287,10 +295,30 @@ class StateRegistry:
         existing = {
             r["name"] for r in self._conn.execute("PRAGMA table_info(logical_documents)").fetchall()
         }
-        with self._conn:
+        # Explicit BEGIN is important here: Python's sqlite3 context manager
+        # does not start a transaction for DDL-only work, so an ALTER could
+        # otherwise be committed before a later migration step fails.
+        self._conn.execute("BEGIN")
+        try:
             for name, decl in self._LOGICAL_DOC_NEW_COLUMNS:
                 if name not in existing:
                     self._conn.execute(f"ALTER TABLE logical_documents ADD COLUMN {name} {decl}")
+            self._conn.execute(
+                "INSERT INTO state_schema(key, value) VALUES ('version', ?) "
+                "ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+                (str(STATE_SCHEMA_VERSION),),
+            )
+            self._conn.commit()
+        except Exception:
+            self._conn.rollback()
+            raise
+
+    @property
+    def schema_version(self) -> int:
+        row = self._conn.execute(
+            "SELECT value FROM state_schema WHERE key = 'version'"
+        ).fetchone()
+        return int(row[0]) if row else 1
 
     # ================= sources: truy vấn (read-only) =================
     def get(self, source_hash: str) -> Optional[SourceState]:
@@ -421,13 +449,15 @@ class StateRegistry:
                 if title and len(title) > _MAX_TITLE_LEN:
                     title = title[:_MAX_TITLE_LEN]
                 classification_kind = d.get("classification_kind") or CLASSIFICATION_KIND_TAXONOMY
-                if classification_kind not in CLASSIFICATION_KINDS:
-                    raise PipelineError(f"classification_kind không hợp lệ: {classification_kind!r}")
-                date_precision = d.get("date_precision")
-                if date_precision is None and d.get("document_date"):
-                    date_precision = "DAY"  # mặc định lùi tương thích: caller cũ không khai precision
-                if date_precision is not None and date_precision not in DATE_PRECISIONS:
-                    raise PipelineError(f"date_precision không hợp lệ: {date_precision!r}")
+                duplicate_of = d.get("duplicate_of")
+                normalized_date, date_precision = validate_classification_metadata(
+                    classification_kind=classification_kind,
+                    type_id=d.get("type_id"),
+                    subtype=d.get("subtype"),
+                    document_date=d.get("document_date"),
+                    date_precision=d.get("date_precision"),
+                    duplicate_of=duplicate_of,
+                )
                 self._conn.execute(
                     """
                     INSERT INTO logical_documents (
@@ -443,8 +473,8 @@ class StateRegistry:
                         ?, ?, ?, ?, ?, NULL, NULL, NULL, NULL)
                     """,
                     (
-                        lid, source_hash, json.dumps(d["source_pages"]), d["type_id"],
-                        float(d["confidence"]), d.get("document_date"),
+                        lid, source_hash, json.dumps(d["source_pages"]), d["type_id"] or "UNKNOWN",
+                        float(d["confidence"]), normalized_date,
                         float(d.get("date_confidence") or 0.0), title,
                         json.dumps(d.get("segmentation_flags") or []),
                         d["classification_status"], json.dumps(d.get("classification_reasons") or []),
@@ -535,6 +565,14 @@ class StateRegistry:
             raise PipelineError(f"resolved_classification_kind không hợp lệ: {kind!r}")
         if resolved_date_precision is not None and resolved_date_precision not in DATE_PRECISIONS:
             raise PipelineError(f"resolved_date_precision không hợp lệ: {resolved_date_precision!r}")
+        validate_classification_metadata(
+            classification_kind=kind,
+            type_id=resolved_type_id,
+            subtype=resolved_subtype,
+            document_date=resolved_document_date,
+            date_precision=resolved_date_precision,
+            duplicate_of=duplicate_of,
+        )
         ts = _now()
         with self._conn:
             cur = self._conn.execute(

@@ -25,6 +25,7 @@ from .policy import (
     CLASSIFICATION_KIND_TAXONOMY,
     is_valid_subtype,
     parse_partial_date,
+    validate_classification_metadata,
 )
 from .state import LogicalDocumentRow, StateRegistry
 
@@ -97,6 +98,8 @@ def resolve_review(
             raise PipelineError(
                 f"resolve-review: type_id '{type_id}' không hợp lệ (phải trong danh mục, khác UNKNOWN)."
             )
+        if subtype is not None and type_id != "87":
+            raise PipelineError("resolve-review: subtype chỉ hợp lệ khi --type-id 87.")
         if not is_valid_subtype(subtype):
             raise PipelineError(f"resolve-review: subtype '{subtype}' không hợp lệ.")
         resolved_type_id = type_id
@@ -129,7 +132,11 @@ def resolve_review(
             )
         resolved_type_id = None  # effective_type_id giữ nguyên type_id gốc
 
-    resolved_date_precision = None
+    if document_date is None and date_precision not in (None, "UNKNOWN"):
+        raise PipelineError(
+            "resolve-review: date_precision phải là UNKNOWN khi --date bị bỏ trống."
+        )
+    resolved_date_precision = "UNKNOWN" if date_precision == "UNKNOWN" else None
     if document_date is not None:
         normalized, inferred_precision = parse_partial_date(document_date)
         if date_precision is not None and date_precision != inferred_precision:
@@ -140,6 +147,15 @@ def resolve_review(
             )
         resolved_date_precision = inferred_precision
         document_date = normalized
+
+    validate_classification_metadata(
+        classification_kind=kind,
+        type_id=resolved_type_id,
+        subtype=resolved_subtype,
+        document_date=document_date,
+        date_precision=resolved_date_precision,
+        duplicate_of=resolved_duplicate_of,
+    )
 
     registry.resolve_review(
         logical_document_id,

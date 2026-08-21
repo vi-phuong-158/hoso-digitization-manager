@@ -130,6 +130,58 @@ _MONTH_RE = re.compile(r"^\d{4}-\d{2}$")
 _YEAR_RE = re.compile(r"^\d{4}$")
 
 
+def normalize_partial_date(
+    value: Optional[str], precision: Optional[str] = None
+) -> tuple[Optional[str], str]:
+    """Validate and normalize a date together with its declared precision.
+
+    ``None`` is represented explicitly as ``UNKNOWN``.  A supplied precision
+    must agree with the ISO value; callers cannot use a precision to invent a
+    missing month or day.
+    """
+    normalized, inferred = parse_partial_date(value)
+    effective = inferred if precision is None else precision
+    if effective not in DATE_PRECISIONS:
+        raise PipelineError(f"date_precision không hợp lệ: {effective!r}")
+    if effective != inferred:
+        raise PipelineError(
+            f"date_precision '{effective}' không khớp document_date {value!r}; "
+            f"độ chính xác đúng là {inferred}."
+        )
+    return normalized, effective
+
+
+def validate_classification_metadata(
+    *,
+    classification_kind: str,
+    type_id: Optional[str],
+    subtype: Optional[str],
+    document_date: Optional[str],
+    date_precision: Optional[str],
+    duplicate_of: Optional[str],
+) -> tuple[Optional[str], str]:
+    """Validate policy fields shared by state and both manifest builders."""
+    if classification_kind not in CLASSIFICATION_KINDS:
+        raise PipelineError(f"classification_kind không hợp lệ: {classification_kind!r}")
+    if classification_kind != CLASSIFICATION_KIND_TAXONOMY:
+        if subtype is not None:
+            raise PipelineError("subtype chỉ hợp lệ với classification_kind=TAXONOMY và type_id=87.")
+        if type_id not in (None, "UNKNOWN"):
+            raise PipelineError("type_id phải rỗng/UNKNOWN với tài liệu ngoài TAXONOMY.")
+    if subtype is not None:
+        if type_id != TYPE_ID_PERSONNEL_DECISION:
+            raise PipelineError("subtype chỉ hợp lệ khi type_id = 87.")
+        if not is_valid_subtype(subtype):
+            raise PipelineError(f"subtype không hợp lệ: {subtype!r}")
+    if classification_kind == CLASSIFICATION_KIND_DUPLICATE:
+        if not duplicate_of:
+            raise PipelineError("DUPLICATE phải có duplicate_of.")
+    elif duplicate_of is not None:
+        raise PipelineError("duplicate_of chỉ hợp lệ với classification_kind=DUPLICATE.")
+    normalized_date, normalized_precision = normalize_partial_date(document_date, date_precision)
+    return normalized_date, normalized_precision
+
+
 def parse_partial_date(value: Optional[str]) -> tuple[Optional[str], str]:
     """(giá trị chuẩn hoá, precision). Không tự bịa ngày/tháng khi thiếu.
 

@@ -12,23 +12,42 @@ from typing import Optional, Sequence
 from .catalog import Catalog
 from .models import UNKNOWN, ClassifiedDocument
 from .pdf_inventory import PersonInventory
+from .policy import (
+    CLASSIFICATION_KIND_TAXONOMY,
+    validate_classification_metadata,
+)
 from .qc import QCReport
 
-MANIFEST_SCHEMA_VERSION = "1.0"
+MANIFEST_SCHEMA_VERSION = "1.1"
 
 
 def document_entry(catalog: Catalog, doc: ClassifiedDocument) -> dict:
     c = doc.classification
+    kind = doc.classification_kind or CLASSIFICATION_KIND_TAXONOMY
+    document_date, date_precision = validate_classification_metadata(
+        classification_kind=kind,
+        type_id=c.type_id,
+        subtype=doc.subtype,
+        document_date=c.document_date,
+        date_precision=doc.date_precision,
+        duplicate_of=doc.duplicate_of,
+    )
+    is_taxonomy = kind == CLASSIFICATION_KIND_TAXONOMY
     entry = {
+        "logical_document_id": doc.logical_document_id or doc.document.doc_key,
         "source_file": doc.document.source_file,
         "source_pages": list(doc.document.source_pages),
         "page_roles": {str(k): v for k, v in doc.document.page_roles.items()},
-        "type_id": c.type_id,
-        "type_name_vi": catalog.name_vi(c.type_id) if c.type_id != UNKNOWN else None,
+        "classification_kind": kind,
+        "type_id": c.type_id if is_taxonomy and c.type_id != UNKNOWN else None,
+        "type_name_vi": catalog.name_vi(c.type_id) if is_taxonomy and c.type_id != UNKNOWN else None,
+        "subtype": doc.subtype,
         "confidence": round(c.confidence, 4),
-        "document_date": c.document_date,
+        "document_date": document_date,
+        "date_precision": date_precision,
         "date_confidence": round(c.date_confidence, 4),
         "title_short": c.title_short,
+        "duplicate_of": doc.duplicate_of,
         "target_file": doc.target_file,
         "target_dir": doc.target_dir,
         "sequence": doc.sequence_index,

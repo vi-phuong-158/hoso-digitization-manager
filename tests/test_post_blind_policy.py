@@ -145,6 +145,18 @@ def test_resolve_review_subtype_khong_hop_le_bi_tu_choi(env):
         resolve_review(registry, catalog, lid, type_id="87", subtype="khong_ton_tai")
 
 
+def test_resolve_review_subtype_non87_bi_tu_choi(env):
+    tmp_path, ws, input_root, analysis_root, registry = env
+    pdf = add_source(
+        input_root, analysis_root, "P", "non87.pdf", type_id="04", needs_review=True,
+        review_reason="LOW_CONFIDENCE",
+    )
+    lid = logical_id_for(registry, "P", pdf, [1])
+    catalog = load_catalog()
+    with pytest.raises(PipelineError, match="type-id 87"):
+        resolve_review(registry, catalog, lid, type_id="04", subtype=SUBTYPE_PROMOTION_SALARY)
+
+
 # ===========================================================================
 # Nhóm 2 — Policy 2: ngoài taxonomy -> SUPPORTING_DOCUMENT
 # ===========================================================================
