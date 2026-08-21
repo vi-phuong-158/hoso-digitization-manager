@@ -1,0 +1,110 @@
+---
+name: party-record-digitization
+description: Luật bắt buộc khi số hóa hồ sơ đảng viên trong workspace này. Áp dụng cho mọi agent đọc/xử lý PDF trong input/.
+alwaysApply: true
+---
+
+# LUẬT SỐ HÓA HỒ SƠ ĐẢNG VIÊN
+
+Ưu tiên: **đúng > truy vết được > tự động hóa cao**.
+Hợp đồng đầy đủ ở `AGENTS.md`. File này là bản rút gọn bắt buộc tuân thủ.
+
+Bạn ở **RUNTIME MODE**. Bạn làm phần **nhận thức**; code local làm phần **quyết định**.
+
+## 0. Incremental — TRƯỚC KHI đọc bất kỳ PDF nào
+
+Hồ sơ được bổ sung liên tục theo thời gian (`input/<TEN_NGUOI>/` có thể có
+thêm PDF mới bất cứ lúc nào). **Trước khi mở bất kỳ PDF nào bằng Vision**, chạy:
+
+```
+python -m app.cli status "input/<TEN_NGUOI>"
+```
+
+Lệnh này chỉ đọc SHA-256 + state registry cục bộ (`state/processing_state.db`),
+KHÔNG mở nội dung PDF. Kết quả phân loại từng file thành:
+`NEW` · `PROCESSED` (SKIP) · `REVIEW_REQUIRED` (SKIP) · `FAILED` (SKIP) ·
+`INTERRUPTED` (SKIP) · `DUPLICATE_SOURCE` (SKIP).
+
+**Bạn chỉ được đọc bằng Vision những file `NEW`**, hoặc file người vận hành
+yêu cầu retry rõ ràng (`retry review` / `retry failed`). **Không đọc lại PDF
+đã `PROCESSED`.** `python -m app.cli process "input/<TEN_NGUOI>"` tự động áp
+dụng đúng luật này — chỉ cần chạy nó, không cần tự lọc file bằng tay; luật này
+tồn tại để bạn HIỂU vì sao lệnh đó không xin phân tích lại những file cũ.
+
+Nếu `status` báo `STATE_OUTPUT_MISMATCH` (state nói đã xử lý nhưng file đầu ra
+bị thiếu): báo cho người vận hành, **không tự tạo lại**, không tự đoán nguyên nhân.
+
+## 1. Phạm vi hồ sơ
+
+1. Mỗi thư mục `input/<TEN_NGUOI>/` là hồ sơ của **một người**. Không trộn hồ sơ.
+2. **Một PDF KHÔNG đồng nghĩa một tài liệu.** Một PDF có thể chứa một tài liệu một trang,
+   một tài liệu nhiều trang, **nhiều tài liệu độc lập**, trang nội dung + bìa,
+   mặt trước + mặt sau, hoặc nhiều văn bản cùng loại khác ngày.
+3. Phải đọc **đủ tất cả các trang** của mọi PDF **NEW** (mục 0). Không được lấy mẫu,
+   không được đoán trang chưa đọc. Mỗi trang phải có một mô tả trong `pages[]`.
+
+## 2. Thứ tự bắt buộc
+
+4. **Segmentation trước classification.** Xác định ranh giới tài liệu ở cấp trang trước,
+   rồi mới phân loại theo **toàn bộ** logical document — không phân loại chỉ bằng trang đầu.
+5. Bìa, mặt sau và trang tiếp nối phải được **ghép đúng** vào tài liệu tương ứng.
+   Bìa/mặt sau không phải tài liệu độc lập nếu tiêu đề, khổ giấy, mẫu bìa và trình tự scan
+   cho thấy chúng thuộc tài liệu liền kề. **Không đổi thứ tự trang.**
+   Không chắc bìa thuộc trước hay sau → `needs_review: true`.
+
+## 3. Taxonomy
+
+6. Chỉ được dùng `type_id` trong khoảng `01`–`104`, hoặc `UNKNOWN`. Không có loại 105.
+7. Phải đọc `document_types.json` trước khi phân loại. Đó là nguồn chân lý duy nhất.
+8. **Không tự tạo taxonomy**, không đổi mã, không đổi tên danh mục.
+   Các cặp dễ nhầm phải soi kỹ: 01/02 · 03/85 · 05/06 · 07/09/10 · 19/72/73 · 22/36/67 ·
+   37/39 · 43/45 · 47/61/62/63/65 · 50/52 · 54/55/56/59 · 57/58 · **70/86** ·
+   92/93/94/95 · 98/99 · 100/60 · 103/104.
+   `70` = bằng/chứng chỉ **lý luận chính trị**. `86` = văn bằng/chứng chỉ chuyên môn,
+   nghiệp vụ, ngoại ngữ, tin học, bồi dưỡng. Không khớp rõ → REVIEW, **không ép nhãn**.
+
+## 4. Đặt tên
+
+9. **Không tự nghĩ filename.** Không gửi `target_file`, `filename`, `sequence`, `status`.
+   Tên file do naming engine local sinh từ `document_types.json`. JSON có khóa dạng đó sẽ bị từ chối.
+
+## 5. Bảo toàn hồ sơ
+
+10. **Không sửa, đổi tên, di chuyển hay xóa PDF trong `input/`.** Chỉ đọc.
+    Trạng thái "đã xử lý" được lưu ở `state/processing_state.db` (SQLite local,
+    khóa bằng SHA-256) — **không** ghi metadata, watermark, chữ `PROCESSED`,
+    hay annotation vào chính file PDF để đánh dấu.
+11. Không sửa `AGENTS.md`.
+12. Không sửa `document_types.json`.
+13. Không sửa `test_cases/*` (golden tests) và `fixtures/*`.
+14. Không tự hạ ngưỡng confidence, không tự đổi chính sách AUTO/REVIEW.
+
+## 6. Khi không chắc
+
+15. **Không chắc → REVIEW. Không đoán.** Đặt `needs_review: true` kèm `review_reason` ngắn.
+    Cụ thể: không đọc được loại; rơi vào cặp dễ nhầm mà không tách bạch được;
+    không rõ ranh giới tài liệu; nhiều tài liệu cùng loại mà không xác định được thứ tự thời gian.
+    Ngày văn bản chỉ ghi khi đọc được chắc chắn — chỉ thấy năm thì để `document_date: null`,
+    **không suy diễn ngày/tháng**.
+16. **Runtime Agent không sửa source code**, không sửa test, không tự triển khai logic mới
+    khi gặp ca lạ. Ca lạ → báo `REVIEW_REQUIRED` và ghi nhận để DEV mode xử lý.
+17. **Không upload tài liệu ra bất kỳ dịch vụ nào ngoài luồng đã được người vận hành phê duyệt.**
+    Pipeline local không gọi API AI qua mạng; đừng thêm.
+18. **Không ghi toàn văn hồ sơ hay dữ liệu cá nhân không cần thiết vào log**, chat hay JSON.
+    `title_short` tối đa 200 ký tự; `notes`/`review_reason` tối đa 300 ký tự.
+
+## 7. Đầu ra của bạn
+
+Mỗi PDF nguồn → một file JSON:
+
+```
+analysis/<TEN_NGUOI>/<ten_pdf_khong_duoi>.json
+```
+
+Đúng hợp đồng trong `app/agent_contract.py`. Sau đó chạy:
+
+```
+python -m app.cli process "input/<TEN_NGUOI>"
+```
+
+Mặc định là **dry-run**. Chỉ chạy `--apply` khi người vận hành yêu cầu rõ bằng chữ `apply`.

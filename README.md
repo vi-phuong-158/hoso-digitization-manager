@@ -1,0 +1,115 @@
+# Pipeline số hóa hồ sơ Đảng viên
+
+Đọc `AGENTS.md` trước. File này chỉ mô tả **code**; hợp đồng vận hành nằm ở `AGENTS.md`,
+quy trình chạy hằng ngày nằm ở `RUNBOOK_ANTIGRAVITY.md`, giới hạn còn lại nằm ở `LIMITATIONS.md`.
+
+## Luồng
+
+```
+input/<người>/*.pdf
+   -> Phase A  pdf_inventory   liệt kê + SHA-256 + khổ trang (chỉ đọc)
+   -> Phase B  vision_adapter  tín hiệu CẤP TRANG do Agent trả về (analysis/*.json)
+   -> Phase C  segmenter       gom trang thành logical document (bìa/mặt sau/trang tiếp)
+   -> Phase D  classifier      phân loại cả tài liệu + chính sách confidence
+   -> Phase E  naming          tên file deterministic từ document_types.json
+   -> Phase F  writer          dry-run (mặc định) / apply, tách bằng page object
+   -> Phase G  qc              coverage, overlap, hash nguồn, tên file, collision
+   -> output/<người>/ , review/<người>/ , logs/<người>/
+```
+
+## Module
+
+| File | Vai trò |
+|------|---------|
+| `app/catalog.py` | Đọc `document_types.json`, hàng rào `type_id`, nhóm dễ nhầm theo AGENTS.md mục 6 |
+| `app/pdf_inventory.py` | Inventory chỉ đọc, SHA-256, khổ trang, so khổ trang |
+| `app/vision_adapter.py` | Interface `DocumentVisionProvider` + registry + validate output của model |
+| `app/providers/agent_provider.py` | **Provider runtime**: đọc JSON do Antigravity Agent ghi ra |
+| `app/agent_contract.py` | Hợp đồng JSON Agent -> code + validator cứng |
+| `app/providers/fixture_provider.py` | Provider fixture cho test/golden |
+| `app/providers/gemini_provider.py` | `NOT_USED_IN_ANTIGRAVITY_RUNTIME` — adapter API cũ, không đăng ký, không nằm trong runtime path |
+| `app/segmenter.py` | Ranh giới tài liệu ở cấp trang |
+| `app/classifier.py` | Phân loại + ngưỡng AUTO / second pass / REVIEW |
+| `app/naming.py` | Naming engine deterministic |
+| `app/manifest.py` | Manifest truy ngược |
+| `app/writer.py` | Tách/ghi file, idempotent, fail-safe |
+| `app/qc.py` | Hàng rào bất biến |
+| `app/pipeline.py` | Điều phối A→G |
+| `app/golden.py` | Golden acceptance |
+| `app/state.py` | State registry (SQLite local) — theo dõi PDF nào đã PROCESSED |
+| `app/incremental.py` | Đối chiếu inventory với state registry -> NEW/SKIP/DUPLICATE/... |
+| `app/state_import.py` | Migration: nạp PROCESSED từ manifest/output đã có sẵn (`import-state`) |
+| `app/cli.py` | CLI |
+
+## Hai trục trạng thái (quan trọng)
+
+Một logical document có **hai** trạng thái, đừng nhầm:
+
+- `classification_status` — trục **phân loại** (Phase D). Golden `expected_review` đối chiếu trục này.
+- `final_status` — trạng thái **cuối** sau Phase E. Một tài liệu phân loại chắc chắn (AUTO)
+  vẫn có thể thành REVIEW nếu nhóm cùng loại không xếp được thứ tự thời gian —
+  đúng quy tắc AGENTS.md Phase E ("không tự đánh `.1/.2` theo thứ tự scan").
+
+Chỉ tài liệu có `final_status = AUTO` mới được mang tên chuẩn và vào `output/`.
+
+## Runtime Antigravity-native
+
+Runtime **không gọi API AI qua mạng và không cần API key**. Kiến trúc:
+
+```
+PDF trong workspace
+   -> Antigravity Runtime Agent  (nhận thức: đọc trang, gom tài liệu, phân loại)
+   -> analysis/<người>/<pdf>.json   (hợp đồng app/agent_contract.py)
+   -> validator local  (từ chối JSON sai: type lạ, thiếu/lặp/chồng trang, tên file, sai kiểu)
+   -> segmenter local  (tự gom lại, đối chiếu chéo với đề xuất của Agent)
+   -> classifier -> naming -> split/copy -> AUTO/REVIEW -> manifest + QC
+```
+
+| Đường dẫn | Vai trò |
+|-----------|---------|
+| `.agents/rules/party-record-digitization.md` | 18 luật khóa cứng cho mọi agent trong workspace |
+| `.agents/agents/document-processor/agent.md` | Custom Runtime Agent + schema JSON |
+| `.agents/workflows/process-party-record.md` | Workflow `/process-party-record`, dừng ở dry-run |
+| `analysis/<người>/<pdf>.json` | Output nhận thức của Agent (đầu vào của pipeline) |
+
+Hai hàng rào kiến trúc được test giữ (`tests/test_runtime_no_network.py`):
+runtime path không import thư viện mạng, không đọc biến môi trường dạng
+API key/token/secret, và pipeline chạy trọn vẹn khi `socket` bị chặn.
+
+## Incremental processing
+
+`process_person_folder(..., state_registry=StateRegistry(...))` là đường đi mặc
+định của CLI: đối chiếu SHA-256 từng PDF với `state/processing_state.db` trước
+khi gọi provider, chỉ nguồn `NEW` (hoặc `--retry-review`/`--retry-failed` rõ
+ràng) mới được đưa cho Agent đọc. `process_person_folder(..., state_registry=None)`
+(mặc định của hàm khi gọi trực tiếp, không qua CLI) giữ nguyên hành vi gốc —
+xử lý toàn bộ nguồn mỗi lần, dùng bởi golden/test để không phụ thuộc state.
+Chi tiết trạng thái/transition: `RUNBOOK_ANTIGRAVITY.md` mục "Incremental processing".
+
+## Ranh giới model
+
+Business logic không import provider nào. Model chỉ được phép trả về:
+
+- tín hiệu **cấp trang** (`analyze_pages`);
+- kết luận loại cho **một logical document** (`classify_document`).
+
+Model **không** được: gom nhóm trang, đặt tên file, đánh số thứ tự, tạo `type_id` mới.
+Mọi output của model đi qua `validate_page_observation` / `validate_classification`.
+
+Thêm provider mới = thêm một file trong `app/providers/` và gọi `register_provider(...)`.
+
+## Chạy
+
+```bash
+python -m pytest tests -q
+```
+
+```bash
+python -m app.cli test-golden --provider agent
+```
+
+```bash
+python -m app.cli process "input/Nguyễn Hữu Hải"
+```
+
+Provider mặc định của `process` là `agent` (đọc `analysis/`). `fixture` chỉ dùng cho test.

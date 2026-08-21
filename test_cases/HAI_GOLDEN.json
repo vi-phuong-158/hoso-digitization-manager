@@ -1,0 +1,201 @@
+{
+  "schema_version": "1.0",
+  "purpose": "Golden acceptance cases derived from the first real HAI sample set. Page numbers are 1-based.",
+  "cases": [
+    {
+      "source_file": "Phieu bo sung hs dang vien 2020 HAI.pdf",
+      "source_pages": 1,
+      "expected_documents": [
+        {
+          "pages": [
+            1
+          ],
+          "type_id": "04",
+          "title_short": "Phiếu bổ sung hồ sơ đảng viên năm 2020",
+          "expected_review": false
+        }
+      ]
+    },
+    {
+      "source_file": "Quyet dinh dieu dong HAI.pdf",
+      "source_pages": 8,
+      "expected_documents": [
+        {
+          "pages": [
+            1
+          ],
+          "type_id": "87",
+          "document_date": "2015-09-23",
+          "title_short": "Quyết định điều động học viên ra trường",
+          "expected_review": false
+        },
+        {
+          "pages": [
+            2
+          ],
+          "type_id": "87",
+          "document_date": "2015-11-03",
+          "title_short": "Quyết định điều động, phân công công tác cán bộ",
+          "expected_review": false
+        },
+        {
+          "pages": [
+            3
+          ],
+          "type_id": "87",
+          "document_date": "2015-11-10",
+          "title_short": "Quyết định phân công công tác cán bộ",
+          "expected_review": false
+        },
+        {
+          "pages": [
+            4
+          ],
+          "type_id": "05",
+          "document_date": "2018-08-19",
+          "title_short": "Quyết định kết nạp đảng viên",
+          "expected_review": false
+        },
+        {
+          "pages": [
+            5
+          ],
+          "type_id": "19",
+          "document_date": "2019-12-31",
+          "title_short": "Quyết định phát thẻ đảng viên",
+          "expected_review": false
+        },
+        {
+          "pages": [
+            6,
+            7
+          ],
+          "type_id": "75",
+          "document_date": null,
+          "title_short": "Giấy khai sinh bản sao, mặt trước và mặt sau",
+          "expected_review": false,
+          "note": "Catalog ghi khai sinh gốc; case này dùng nhãn 75 theo bản chất tài liệu. Nếu quy định nội bộ yêu cầu chỉ nhận bản gốc, chuyển sang REVIEW thay vì tự đổi taxonomy."
+        },
+        {
+          "pages": [
+            8
+          ],
+          "type_id": "07",
+          "document_date": "2019-09-30",
+          "title_short": "Quyết định công nhận đảng viên chính thức",
+          "expected_review": false
+        }
+      ]
+    },
+    {
+      "source_file": "Bang cap cua HAI.pdf",
+      "source_pages": 20,
+      "expected_documents": [
+        {
+          "pages": [
+            1,
+            2
+          ],
+          "type_id": "86",
+          "title_short": "Giấy chứng nhận khóa bồi dưỡng tiếng Lào",
+          "expected_review": false
+        },
+        {
+          "pages": [
+            3,
+            4
+          ],
+          "type_id": "86",
+          "document_date": "2023-05-15",
+          "title_short": "Bằng cử nhân Điều tra hình sự",
+          "expected_review": false
+        },
+        {
+          "pages": [
+            5,
+            6
+          ],
+          "type_id": "86",
+          "title_short": "Chứng nhận bồi dưỡng kiến thức quốc phòng và an ninh đối tượng 4",
+          "expected_review": false
+        },
+        {
+          "pages": [
+            7,
+            8
+          ],
+          "type_id": "86",
+          "document_date": "2022-10-14",
+          "title_short": "Chứng chỉ tiếng Anh B1",
+          "expected_review": false
+        },
+        {
+          "pages": [
+            9,
+            10
+          ],
+          "type_id": "70",
+          "title_short": "Chứng nhận bổ sung kiến thức tương đương sơ cấp lý luận chính trị",
+          "expected_review": false
+        },
+        {
+          "pages": [
+            11,
+            12
+          ],
+          "type_id": "86",
+          "document_date": "2015-09-18",
+          "title_short": "Bằng tốt nghiệp trung cấp chuyên nghiệp",
+          "expected_review": false
+        },
+        {
+          "pages": [
+            13,
+            14
+          ],
+          "type_id": "86",
+          "document_date": "2015-01-26",
+          "title_short": "Chứng chỉ tiếng Anh A1",
+          "expected_review": false
+        },
+        {
+          "pages": [
+            15,
+            16
+          ],
+          "type_id": "86",
+          "document_date": "2015-01-26",
+          "title_short": "Chứng chỉ tin học ứng dụng trình độ A",
+          "expected_review": false
+        },
+        {
+          "pages": [
+            17,
+            18
+          ],
+          "type_id": "86",
+          "document_date": "2013-09-10",
+          "title_short": "Bằng tốt nghiệp trung học phổ thông",
+          "expected_review": true,
+          "note": "Taxonomy 86 không nêu rõ văn bằng THPT. Golden yêu cầu hệ thống nhận diện ứng viên 86 nhưng đưa REVIEW để người vận hành chốt chính sách."
+        },
+        {
+          "pages": [
+            19,
+            20
+          ],
+          "type_id": "86",
+          "document_date": "2021-01-08",
+          "title_short": "Chứng chỉ ứng dụng công nghệ thông tin cơ bản",
+          "expected_review": false
+        }
+      ]
+    }
+  ],
+  "acceptance": {
+    "page_coverage_required": 1.0,
+    "page_overlap_allowed": 0,
+    "segmentation_exact_match": true,
+    "classification_exact_or_expected_review": true
+  }
+}
