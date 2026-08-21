@@ -36,8 +36,12 @@ input/<người>/*.pdf
 | `app/qc.py` | Hàng rào bất biến |
 | `app/pipeline.py` | Điều phối A→G |
 | `app/golden.py` | Golden acceptance |
-| `app/state.py` | State registry (SQLite local) — theo dõi PDF nào đã PROCESSED |
-| `app/incremental.py` | Đối chiếu inventory với state registry -> NEW/SKIP/DUPLICATE/... |
+| `app/state.py` | State registry (SQLite local): 6 trạng thái nguồn + bảng `logical_documents` (đơn vị resolve/naming) |
+| `app/fingerprint.py` | Fingerprint cache (taxonomy + schema hợp đồng) — quyết định cache còn dùng được hay STALE |
+| `app/incremental.py` | Đối chiếu inventory + fingerprint với state registry -> NEW/STALE/CACHED/PROCESSED/... |
+| `app/global_naming.py` | Đặt tên `.1/.2/...` nhìn TOÀN BỘ hồ sơ (không chỉ lượt chạy) + rename plan 2 pha fail-safe |
+| `app/review.py` | `review-list`/`resolve-review` — người vận hành chốt REVIEW không cần Agent đọc lại PDF |
+| `app/reconcile.py` | Đối chiếu state DB với file thật trên đĩa (`reconcile`), chỉ báo cáo |
 | `app/state_import.py` | Migration: nạp PROCESSED từ manifest/output đã có sẵn (`import-state`) |
 | `app/cli.py` | CLI |
 
@@ -76,15 +80,27 @@ Hai hàng rào kiến trúc được test giữ (`tests/test_runtime_no_network.
 runtime path không import thư viện mạng, không đọc biến môi trường dạng
 API key/token/secret, và pipeline chạy trọn vẹn khi `socket` bị chặn.
 
-## Incremental processing
+## Incremental processing + global naming
 
 `process_person_folder(..., state_registry=StateRegistry(...))` là đường đi mặc
-định của CLI: đối chiếu SHA-256 từng PDF với `state/processing_state.db` trước
-khi gọi provider, chỉ nguồn `NEW` (hoặc `--retry-review`/`--retry-failed` rõ
-ràng) mới được đưa cho Agent đọc. `process_person_folder(..., state_registry=None)`
-(mặc định của hàm khi gọi trực tiếp, không qua CLI) giữ nguyên hành vi gốc —
-xử lý toàn bộ nguồn mỗi lần, dùng bởi golden/test để không phụ thuộc state.
-Chi tiết trạng thái/transition: `RUNBOOK_ANTIGRAVITY.md` mục "Incremental processing".
+định của CLI. `process_person_folder(..., state_registry=None)` (mặc định của
+hàm khi gọi trực tiếp) giữ nguyên hành vi gốc — xử lý toàn bộ nguồn mỗi lần,
+dùng bởi `golden.py`/test cũ để không phụ thuộc state.
+
+Hai khái niệm tách biệt trong `app/state.py`:
+
+- **AI đã đọc xong** — `ANALYZED_PENDING_APPLY` (không cần review) hoặc
+  `REVIEW_REQUIRED` (còn logical document cần người chốt). Gắn fingerprint
+  (taxonomy + schema); fingerprint đổi -> `STALE_ANALYSIS`, đọc lại.
+- **Nghiệp vụ đã xong** — `PROCESSED`, chỉ khi apply thành công + QC PASS +
+  không còn logical document nào `REVIEW_PENDING`.
+
+Đặt tên `.1/.2/...` (`app/global_naming.py`) nhìn **toàn bộ** logical document
+đã biết của một người qua bảng `logical_documents`, không chỉ nguồn xử lý trong
+lượt hiện tại — chèn tài liệu cũ hơn có thể đổi tên file đã ghi từ lượt trước,
+thực thi bằng kế hoạch rename 2 pha fail-safe (`execute_rename_plan`).
+
+Chi tiết trạng thái/transition/lệnh: `RUNBOOK_ANTIGRAVITY.md`.
 
 ## Ranh giới model
 

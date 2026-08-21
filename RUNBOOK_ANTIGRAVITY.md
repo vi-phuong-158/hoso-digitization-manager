@@ -33,13 +33,16 @@ python -m app.cli process "input/<TEN_NGUOI>" --apply
 
 | Lệnh | Ý nghĩa |
 |------|---------|
-| `status "<thư mục>"` | Chỉ đọc: đếm NEW/PROCESSED/REVIEW_REQUIRED/FAILED/DUPLICATE_SOURCE. Không mở PDF. |
-| `process "<thư mục>"` | Dry-run (mặc định). **Chỉ xử lý nguồn NEW**, SKIP nguồn đã PROCESSED. Không ghi `output/`, `review/`. |
-| `process "<thư mục>" --apply` | Ghi thật. Chỉ chạy khi QC đạt. Nguồn đã PROCESSED vẫn SKIP. |
-| `process "<thư mục>" --retry-review` | Đọc lại các nguồn đang REVIEW_REQUIRED (dry-run). |
-| `process "<thư mục>" --retry-failed` | Đọc lại các nguồn FAILED/INTERRUPTED. |
+| `status "<thư mục>"` | Chỉ đọc: đếm NEW/STALE_ANALYSIS/ANALYZED_PENDING_APPLY/REVIEW_REQUIRED/PROCESSED/FAILED/DUPLICATE_SOURCE. Không mở PDF. |
+| `process "<thư mục>"` | Dry-run (mặc định). **Chỉ gọi Vision cho nguồn NEW/STALE**, tái dùng cache cho phần còn lại. Không ghi `output/`, `review/`. |
+| `process "<thư mục>" --apply` | Ghi thật. Chỉ chạy khi QC đạt. Nguồn PROCESSED vẫn SKIP hoàn toàn. |
+| `process "<thư mục>" --retry-review` | Đọc lại (Vision) các nguồn đang REVIEW_REQUIRED thay vì dùng cache. |
+| `process "<thư mục>" --retry-failed` | Xử lý lại các nguồn FAILED/INTERRUPTED. |
 | `process "<thư mục>" --no-state` | Tắt incremental — xử lý lại TOÀN BỘ nguồn như trước khi có state registry. |
 | `process "<thư mục>" --json` | In manifest JSON thay vì summary. |
+| `review-list "<thư mục>"` | Liệt kê logical document đang REVIEW_PENDING (loại, ngày, lý do). |
+| `resolve-review <id> --type-id <mã> [--date yyyy-mm-dd]` | Chốt một logical document REVIEW_PENDING. KHÔNG đọc lại PDF. |
+| `reconcile "<thư mục>"` | Đối chiếu state DB với file thật trên đĩa; báo STATE_OUTPUT_MISMATCH/orphan, không tự sửa. |
 | `inventory "<thư mục>"` | Liệt kê file nguồn + số trang + SHA-256 (không liên quan state). |
 | `import-state "<thư mục>"` | Nạp lại state PROCESSED từ manifest/output đã có sẵn (hồ sơ xử lý trước khi có state registry — xem mục "Migration" dưới). |
 | `state-export [--out file.json]` | Xuất toàn bộ `state/processing_state.db` ra JSON để backup/kiểm tra. |
@@ -57,16 +60,37 @@ Mỗi PDF được nhận diện bằng **SHA-256 nội dung**, không phải t�
 - Cùng tên nhưng nội dung bị thay (hash đổi) → coi là nguồn **mới**, phải xử lý.
 - Hai file khác tên, cùng nội dung (hash trùng) → chỉ file đầu tiên (theo alphabet) được xử lý,
   file còn lại là `DUPLICATE_SOURCE`, không bao giờ tạo output.
-- Dry-run **không bao giờ** đánh dấu PROCESSED — chỉ apply thành công + QC PASS mới đánh dấu.
-- Apply thất bại (QC fail hoặc xung đột file đích) → nguồn đó thành `FAILED`, **không tự retry**;
-  cần `--retry-failed` rõ ràng ở lần sau.
-- Tiến trình bị dừng đột ngột giữa chừng (crash, đóng Antigravity) → nguồn đó hiện `INTERRUPTED`
-  ở lần chạy sau, cũng cần `--retry-failed` mới xử lý lại — không tự coi là PROCESSED.
 
-**Giới hạn đã biết:** đánh số `.1/.2/...` cho nhiều tài liệu cùng loại chỉ tính trong
-PHẠM VI MỘT LƯỢT CHẠY. Nếu lượt sau thêm một tài liệu CÙNG LOẠI với tài liệu đã có
-từ lượt trước, tên file có thể trùng với file đã ghi — pipeline sẽ **CHẶN AN TOÀN**
-(`BLOCKED_RUNTIME`, không ghi đè âm thầm) thay vì tự đánh số tiếp. Xem `LIMITATIONS.md`.
+**Hai trục tách biệt.** "AI đã đọc xong" (`ANALYZED_PENDING_APPLY`/`REVIEW_REQUIRED`,
+có cache) khác với "nghiệp vụ đã xong" (`PROCESSED`). Cache được gắn **fingerprint**
+(taxonomy + schema hợp đồng); đổi `document_types.json` hay hợp đồng JSON làm cache
+hết hạn (`STALE_ANALYSIS`), tự động đọc lại — không cần thao tác gì thêm.
+
+- Dry-run **không bao giờ** đánh dấu PROCESSED.
+- Một nguồn có tài liệu REVIEW **không bao giờ** tự thành PROCESSED chỉ vì đã
+  apply/copy ra `review/` — phải `resolve-review` từng logical document trước.
+- Apply thất bại (QC fail hoặc xung đột ghi/đổi tên) → nguồn đó thành `FAILED`,
+  **không tự retry**; cần `--retry-failed` rõ ràng ở lần sau.
+- Tiến trình bị dừng đột ngột giữa chừng (crash, đóng Antigravity) → nguồn đó hiện
+  `INTERRUPTED` ở lần chạy sau, cũng cần `--retry-failed` mới xử lý lại.
+
+### Đặt tên toàn cục (global naming)
+
+Đánh số `.1/.2/...` cho nhiều tài liệu cùng `type_id` nhìn **TOÀN BỘ** hồ sơ của
+một người (mọi nguồn, mọi lượt chạy), không chỉ lượt hiện tại:
+
+- Thêm tài liệu mới hơn → chỉ thêm số tiếp theo, không đụng file cũ.
+- Thêm tài liệu cũ hơn (chen vào giữa) → các file `.1/.2/...` **đã ghi trước đó
+  có thể bị đổi tên** để đúng thứ tự thời gian. Đây là hành vi ĐÚNG, không phải lỗi.
+  Nội dung file không đổi, chỉ tên thay đổi; `logical_document_id` (khóa nội bộ
+  trong manifest) giữ nguyên nên vẫn truy vết được lịch sử.
+- Hai tài liệu trùng ngày: xếp bằng tie-break xác định (tiêu đề chuẩn hoá → mã
+  băm nguồn → số trang) — `same_date_tie_break: "deterministic"` trong manifest.
+  Không dùng thứ tự scan làm mốc thời gian.
+- Việc đổi tên thực thi bằng kế hoạch 2 pha an toàn (đổi sang tên tạm trước, rồi
+  mới đổi sang tên cuối) — lỗi giữa chừng (đĩa đầy, quyền ghi...) sẽ **rollback
+  về đúng trạng thái ban đầu**, báo `BLOCKED_RUNTIME`, và nguồn liên quan thành
+  `FAILED` — không có trạng thái nửa-đổi-tên nào được commit.
 
 ### Migration cho hồ sơ đã xử lý trước khi có state registry
 
@@ -113,14 +137,15 @@ Thiếu file này thì pipeline dừng với thông báo rõ ràng; không có c
 | `CONFUSABLE_TYPE_NARROW_MARGIN` | Cặp dễ nhầm (vd 70 vs 86), cách biệt hẹp | Chọn loại đúng |
 | `SEGMENTATION_AMBIGUITY` | Không chắc bìa/mặt sau thuộc tài liệu nào | Xác định ranh giới trang |
 | `AGENT_SEGMENTATION_MISMATCH` | Agent gom trang khác segmenter local | Xác định lại ranh giới trang |
-| `ORDERING_MISSING_RELIABLE_DATE` | Nhiều tài liệu cùng loại, thiếu ngày đáng tin | Chốt thứ tự `.1/.2/...` |
-| `ORDERING_DUPLICATE_DATE` | Nhiều tài liệu cùng loại trùng ngày | Chốt thứ tự `.1/.2/...` |
+| `ORDERING_MISSING_RELIABLE_DATE` | Có tài liệu cùng loại thiếu ngày đáng tin cậy | `resolve-review` bổ sung ngày, hoặc xác nhận ngày đã đọc là đúng |
+
+Lưu ý: hai tài liệu cùng loại **trùng ngày** không còn là lý do REVIEW — global
+naming (mục dưới) tự xếp bằng tie-break xác định, không cần người vận hành can thiệp.
 
 ## Apply lại nhiều lần
 
-- File đích đã đúng: bỏ qua, không ghi lại, không tạo bản trùng.
-- File đích tồn tại nhưng khác nội dung: **dừng toàn bộ, không ghi file nào**, báo `BLOCKED_RUNTIME`.
-- Ghi đè có chủ đích chỉ khi người vận hành yêu cầu rõ và dùng `--force`.
+- Không có gì mới/thay đổi: 0 thao tác ghi/đổi tên, không tạo bản trùng, không đụng mtime file.
+- Rename plan lỗi giữa chừng: **rollback về đúng trạng thái ban đầu**, không ghi file nào, báo `BLOCKED_RUNTIME`.
 
 ## Runtime Agent bị cấm
 
@@ -130,7 +155,9 @@ Thiếu file này thì pipeline dừng với thông báo rõ ràng; không có c
 - sửa source code trong `app/`, sửa tests;
 - tự thay threshold;
 - tự tạo taxonomy mới;
-- tự đặt tên file / đánh số `.1/.2`;
+- tự đặt tên file / đánh số `.1/.2`, tự đổi chính sách global naming/tie-break;
+- tự resolve một logical document REVIEW_PENDING thay người vận hành;
+- đọc lại (Vision) nguồn đã có cache hợp lệ (PROCESSED hoặc fingerprint chưa đổi);
 - sửa/xóa/di chuyển input;
 - gửi tài liệu ra dịch vụ ngoài luồng đã được người vận hành phê duyệt.
 

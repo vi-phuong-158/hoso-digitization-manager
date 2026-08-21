@@ -5,11 +5,13 @@ Mặc định dry-run. Apply chỉ chạy khi QC đạt.
 Có hai đường đi:
   - `state_registry=None` (mặc định của hàm): xử lý TOÀN BỘ nguồn trong thư
     mục mỗi lần gọi, y hệt hành vi gốc trước khi có incremental processing.
-    Toàn bộ test cũ dùng đường đi này, không đổi hành vi.
-  - `state_registry=<StateRegistry>`: đường đi incremental. Trước khi đọc bất
-    kỳ PDF nào, đối chiếu SHA-256 với registry; chỉ những nguồn NEW (hoặc được
-    yêu cầu retry rõ ràng) mới được đưa cho provider đọc. Nguồn ALREADY_PROCESSED
-    / DUPLICATE_SOURCE hoàn toàn không được chạm tới.
+    Toàn bộ test cũ và `golden.py` dùng đường đi này, không đổi hành vi.
+  - `state_registry=<StateRegistry>`: đường đi incremental + global cross-run
+    naming. Trước khi đọc bất kỳ PDF nào, đối chiếu SHA-256 + fingerprint
+    (taxonomy/schema) với registry; chỉ nguồn NEW/STALE (hoặc retry rõ ràng)
+    mới được đưa cho provider đọc. Đặt tên `.1/.2/...` nhìn TOÀN BỘ logical
+    document đã biết của một người (không chỉ lượt chạy hiện tại) - xem
+    `app/global_naming.py`.
 """
 from __future__ import annotations
 
@@ -17,22 +19,33 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Optional
 
+from pypdf import PdfReader
+
 from .catalog import Catalog, find_catalog_path, load_catalog
 from .classifier import DEFAULT_POLICY, ConfidencePolicy, classify_document
+from .fingerprint import current_fingerprint
+from .global_naming import (
+    NameableDoc,
+    SAME_DATE_TIE_BREAK,
+    build_rename_plan,
+    compute_global_assignment,
+    execute_rename_plan,
+    has_collisions,
+)
 from .incremental import IncrementalScan, scan_person_folder
 from .manifest import build_manifest, load_manifest, save_manifest
 from .models import MODE_APPLY, MODE_DRY_RUN, ClassifiedDocument, PipelineError
-from .naming import DEFAULT_NAMING_POLICY, NamingPolicy, assign_names
-from .pdf_inventory import PersonInventory, SourceFile, build_inventory
+from .naming import DEFAULT_NAMING_POLICY, NamingPolicy, assign_names, review_filename
+from .pdf_inventory import PersonInventory, SourceFile, build_inventory, verify_unchanged
 from .qc import QCReport, run_qc
 from .segmenter import (
     DEFAULT_SEGMENTATION_CONFIG,
     SegmentationConfig,
     segment_source,
 )
-from .state import DB_FILENAME, StateRegistry
+from .state import DB_FILENAME, LogicalDocumentRow, StateRegistry
 from .vision_adapter import DocumentVisionProvider, get_provider, validate_page_observation
-from .writer import LEDGER_FILENAME, WriteResult, apply_documents, plan_targets, verify_outputs
+from .writer import LEDGER_FILENAME, WriteResult, apply_documents, plan_targets, split_pages, verify_outputs
 
 # Re-export để tương thích ngược: `from app.pipeline import MODE_APPLY, MODE_DRY_RUN`.
 __all__ = [
@@ -85,10 +98,13 @@ class PipelineResult:
     write_result: Optional[WriteResult] = None
     notes: list[str] = field(default_factory=list)
     incremental: Optional[IncrementalScan] = None
+    status_override: Optional[str] = None
 
     @property
     def status(self) -> str:
         """Trạng thái kết thúc theo RUNBOOK_ANTIGRAVITY.md (đúng 5 giá trị)."""
+        if self.status_override is not None:
+            return self.status_override
         if not self.qc.passed:
             return "BLOCKED_QC"
         if self.mode == MODE_APPLY:
@@ -134,26 +150,15 @@ def process_person_folder(
 
     if state_registry is not None:
         return _process_incremental(
-            inventory=inventory,
-            mode=mode,
-            provider=provider,
-            catalog=catalog,
-            ws=ws,
-            output_dir=output_dir,
-            review_dir=review_dir,
-            segmentation_config=segmentation_config,
-            confidence_policy=confidence_policy,
-            naming_policy=naming_policy,
-            force=force,
-            write_manifest=write_manifest,
-            state_registry=state_registry,
-            retry_review=retry_review,
-            retry_failed=retry_failed,
+            inventory=inventory, mode=mode, provider=provider, catalog=catalog, ws=ws,
+            output_dir=output_dir, review_dir=review_dir, segmentation_config=segmentation_config,
+            confidence_policy=confidence_policy, naming_policy=naming_policy, write_manifest=write_manifest,
+            state_registry=state_registry, retry_review=retry_review, retry_failed=retry_failed,
         )
 
     # ================= Đường đi CŨ (không state-aware) =================
     # Xử lý TOÀN BỘ nguồn mỗi lần gọi - hành vi giữ nguyên 100% so với trước
-    # khi có incremental processing. Mọi test cũ dùng nhánh này.
+    # khi có incremental processing. golden.py và mọi test cũ dùng nhánh này.
     documents: list[ClassifiedDocument] = []
     notes: list[str] = []
     for src in inventory.sources:
@@ -232,11 +237,8 @@ def _process_source(
         validate_page_observation(obs, catalog, where=f"{src.name}/trang {obs.page_number}")
     by_page = {o.page_number: o for o in observations}
 
-    # Phase C - Segmentation (deterministic, do code local quyết định).
     logical_docs = segment_source(src, observations, segmentation_config)
 
-    # Đối chiếu chéo với cách gom trang do Agent đề xuất (nếu có).
-    # Lệch nhau = không chắc -> REVIEW; không bên nào được mặc định là đúng.
     proposed = provider.proposed_documents(src.path)
     if proposed is not None:
         mismatches = cross_check_segmentation(logical_docs, proposed)
@@ -246,7 +248,6 @@ def _process_source(
                 f"{len(mismatches)} nhóm trang -> đưa REVIEW."
             )
 
-    # Phase D - Classification (đọc toàn bộ logical document).
     out: list[ClassifiedDocument] = []
     for ldoc in logical_docs:
         doc_obs = [by_page[p] for p in ldoc.source_pages]
@@ -256,6 +257,60 @@ def _process_source(
     return out
 
 
+def _analysis_qc(
+    inventory: PersonInventory, documents: list[ClassifiedDocument], sources: list[SourceFile]
+) -> QCReport:
+    """QC ngay sau Phase B-D, TRƯỚC khi đặt tên (naming toàn cục chạy sau, ở
+    apply). Chỉ kiểm coverage/overlap/status - không kiểm tên file vì chưa có."""
+    report = QCReport()
+    coverage_problems: list[str] = []
+    overlap_problems: list[str] = []
+    for src in sources:
+        seen: dict[int, str] = {}
+        for doc in documents:
+            if doc.document.source_file != src.name:
+                continue
+            for p in doc.document.source_pages:
+                if p in seen:
+                    overlap_problems.append(f"{src.name} trang {p}: {seen[p]} & {doc.document.doc_key}")
+                seen[p] = doc.document.doc_key
+        missing = sorted(set(range(1, src.pages + 1)) - set(seen))
+        if missing:
+            coverage_problems.append(f"{src.name}: thiếu trang {missing}")
+    total_pages = sum(s.pages for s in sources)
+    covered = sum(len(d.document.source_pages) for d in documents)
+    report.add(
+        "page_coverage", not coverage_problems and covered == total_pages,
+        f"{covered}/{total_pages} trang được gán tài liệu. " + "; ".join(coverage_problems),
+    )
+    report.add("page_overlap", not overlap_problems, "; ".join(overlap_problems) or "0 trang bị dùng lặp")
+    bad_status = [d.document.doc_key for d in documents if d.classification_status not in ("AUTO", "REVIEW")]
+    report.add(
+        "status_coverage", not bad_status and len(documents) > 0,
+        "; ".join(bad_status) or f"{len(documents)} logical document đều có trạng thái",
+    )
+    sane = 1 <= len(documents) <= total_pages if total_pages else len(documents) == 0
+    report.add("document_count_sane", sane, f"{len(documents)} logical document / {total_pages} trang nguồn")
+    return report
+
+
+def _to_cache_dict(cd: ClassifiedDocument) -> dict:
+    return {
+        "source_pages": list(cd.document.source_pages),
+        "type_id": cd.classification.type_id,
+        "confidence": cd.classification.confidence,
+        "document_date": cd.classification.document_date,
+        "date_confidence": cd.classification.date_confidence,
+        "title_short": cd.classification.title_short,
+        "segmentation_flags": list(cd.document.segmentation_flags),
+        "classification_status": cd.classification_status,
+        "classification_reasons": list(cd.classification_reasons),
+    }
+
+
+# ===========================================================================
+# Đường đi incremental + global cross-run naming
+# ===========================================================================
 def _process_incremental(
     *,
     inventory: PersonInventory,
@@ -268,233 +323,384 @@ def _process_incremental(
     segmentation_config: SegmentationConfig,
     confidence_policy: ConfidencePolicy,
     naming_policy: NamingPolicy,
-    force: bool,
     write_manifest: bool,
     state_registry: StateRegistry,
     retry_review: bool,
     retry_failed: bool,
 ) -> PipelineResult:
-    incremental = scan_person_folder(
-        inventory, state_registry, mode=mode, retry_review=retry_review, retry_failed=retry_failed,
+    fp = current_fingerprint(catalog)
+    scan = scan_person_folder(
+        inventory, state_registry, mode=mode, fingerprint=fp,
+        retry_review=retry_review, retry_failed=retry_failed,
         output_dir=output_dir, review_dir=review_dir,
     )
-    sources_to_process = incremental.to_process
-
-    # PROCESSING phải được commit TRƯỚC khi đưa PDF cho provider đọc, để lần
-    # chạy sau phát hiện được nếu tiến trình bị crash giữa chừng (INTERRUPTED).
-    for d in incremental.decisions:
-        if d.will_process:
-            state_registry.begin_processing(
-                source_hash=d.source.sha256,
-                source_filename=d.source.name,
-                source_relative_path=f"{inventory.person_folder}/{d.source.name}",
-                person_folder=inventory.person_folder,
-                page_count=d.source.pages,
-            )
 
     notes: list[str] = []
-    documents: list[ClassifiedDocument] = []
     failed: dict[str, str] = {}  # source_hash -> lỗi
 
-    for src in sources_to_process:
+    agent_decisions = [d for d in scan.decisions if d.needs_agent]
+    for d in agent_decisions:
+        state_registry.begin_processing(
+            source_hash=d.source.sha256, source_filename=d.source.name,
+            source_relative_path=f"{inventory.person_folder}/{d.source.name}",
+            person_folder=inventory.person_folder, page_count=d.source.pages,
+        )
+
+    fresh_by_source: dict[str, list[ClassifiedDocument]] = {}
+    for d in agent_decisions:
+        src = d.source
         try:
-            documents.extend(
-                _process_source(provider, catalog, src, segmentation_config, confidence_policy, notes)
+            docs = _process_source(provider, catalog, src, segmentation_config, confidence_policy, notes)
+            fresh_by_source[src.sha256] = docs
+            state_registry.save_analysis(
+                src.sha256,
+                documents=[_to_cache_dict(cd) for cd in docs],
+                taxonomy_version=fp.taxonomy_version,
+                analysis_schema_version=fp.analysis_schema_version,
             )
         except Exception as exc:  # cô lập lỗi theo từng nguồn - 1 file hỏng không sập cả lượt
             failed[src.sha256] = str(exc)
             notes.append(f"{src.name}: LỖI xử lý -> {exc}")
+            state_registry.mark_failed(src.sha256, error=str(exc))
 
-    for h, err in failed.items():
-        state_registry.mark_failed(h, error=err)
-
-    ok_sources = [s for s in sources_to_process if s.sha256 not in failed]
-
-    if not ok_sources:
-        empty_qc = QCReport()
-        manifest = build_manifest(
-            catalog, inventory, [], empty_qc, mode=mode, provider=provider.describe(), targets={}
-        )
-        manifest["incremental"] = incremental.as_dict()
-        if failed:
-            manifest["failed_this_run"] = [
-                {"source_file": s.name, "error": failed[s.sha256]}
-                for s in sources_to_process if s.sha256 in failed
-            ]
-        manifest_path = _persist(manifest, ws, inventory.person_folder, mode) if write_manifest else None
-        return PipelineResult(
-            person_folder=inventory.person_folder, mode=mode, inventory=inventory,
-            documents=[], qc=empty_qc, manifest=manifest, manifest_path=manifest_path,
-            notes=notes or ["Không có nguồn mới cần xử lý."], incremental=incremental,
-        )
-
-    assign_names(catalog, documents, output_dir, review_dir, naming_policy)
-
-    write_result: Optional[WriteResult] = None
-    output_problems: Optional[list[str]] = None
-    targets = plan_targets(documents, inventory, output_dir, review_dir)
-    targets_by_name = {v["target_file"]: v for v in targets.values()}
-    ledger_path = output_dir / LEDGER_FILENAME
-
-    if mode == MODE_APPLY:
-        pre_qc = run_qc(catalog, inventory, documents, output_dir, review_dir, sources=ok_sources)
-        if not pre_qc.passed:
-            for s in ok_sources:
+    # QC coverage/overlap chỉ áp cho các nguồn VỪA được Agent đọc lượt này -
+    # nguồn dùng lại cache đã qua QC này ở đúng lượt nó được phân tích lần đầu.
+    fresh_ok_sources = [d.source for d in agent_decisions if d.source.sha256 not in failed]
+    qc = QCReport()
+    if fresh_ok_sources:
+        fresh_documents = [cd for s in fresh_ok_sources for cd in fresh_by_source[s.sha256]]
+        qc = _analysis_qc(inventory, fresh_documents, fresh_ok_sources)
+        if not qc.passed:
+            for s in fresh_ok_sources:
+                if s.sha256 in failed:
+                    continue
                 state_registry.mark_failed(
                     s.sha256,
-                    error="QC (trước khi ghi) không đạt: "
-                    + "; ".join(f"{c.name}: {c.detail}" for c in pre_qc.failures),
+                    error="QC (phân tích) không đạt: " + "; ".join(f"{c.name}: {c.detail}" for c in qc.failures),
                 )
-            manifest = build_manifest(
-                catalog, inventory, documents, pre_qc, mode=mode,
-                provider=provider.describe(), targets=targets_by_name,
-            )
-            manifest["incremental"] = incremental.as_dict()
-            path = _persist(manifest, ws, inventory.person_folder, mode) if write_manifest else None
-            return PipelineResult(
-                person_folder=inventory.person_folder, mode=mode, inventory=inventory,
-                documents=documents, qc=pre_qc, manifest=manifest, manifest_path=path,
-                notes=notes + ["QC không đạt -> không apply."], incremental=incremental,
-            )
+                failed[s.sha256] = "QC phân tích không đạt"
 
-        previous = load_manifest(ledger_path)
-        write_result = apply_documents(
-            documents, inventory, output_dir, review_dir, previous_ledger=previous, force=force
+    apply_sources = [d.source for d in scan.decisions if d.needs_apply and d.source.sha256 not in failed]
+
+    if mode == MODE_DRY_RUN:
+        return _finish_dry_run(
+            inventory=inventory, ws=ws, catalog=catalog, provider=provider, scan=scan, qc=qc,
+            notes=notes, failed=failed, write_manifest=write_manifest, state_registry=state_registry,
         )
-        if write_result.ok:
-            output_problems = verify_outputs(documents, output_dir, review_dir)
-        else:
-            notes.append("Có xung đột file đầu ra -> không ghi gì cả (fail-safe).")
-            for s in ok_sources:
-                state_registry.mark_failed(
-                    s.sha256,
-                    error="Xung đột file đầu ra khi apply: " + "; ".join(write_result.conflicts),
-                )
 
-    qc = run_qc(catalog, inventory, documents, output_dir, review_dir, output_problems, sources=ok_sources)
-
-    if write_result is not None:
-        for name, sha in write_result.output_sha256.items():
-            if name in targets_by_name:
-                targets_by_name[name]["output_sha256"] = sha
-
-    manifest = build_manifest(
-        catalog, inventory, documents, qc, mode=mode,
-        provider=provider.describe(), targets=targets_by_name,
-    )
-    if write_result is not None:
-        manifest["write_result"] = write_result.as_dict()
-    manifest["incremental"] = incremental.as_dict()
-    if failed:
-        manifest["failed_this_run"] = [{"source_file": name, "error": err} for name, err in (
-            (s.name, failed[s.sha256]) for s in sources_to_process if s.sha256 in failed
-        )]
-
-    manifest_path = None
-    if write_manifest:
-        manifest_path = _persist(manifest, ws, inventory.person_folder, mode)
-        if mode == MODE_APPLY and write_result is not None and write_result.ok:
-            merged = _merge_ledger(load_manifest(ledger_path), manifest, {s.name for s in ok_sources})
-            save_manifest(merged, ledger_path)
-
-    _apply_state_transitions(
-        mode=mode, qc=qc, write_result=write_result, documents=documents,
-        ok_sources=ok_sources, state_registry=state_registry, ledger_path=ledger_path,
-        manifest_path=manifest_path,
-    )
-
-    return PipelineResult(
-        person_folder=inventory.person_folder, mode=mode, inventory=inventory, documents=documents,
-        qc=qc, manifest=manifest, manifest_path=manifest_path, write_result=write_result,
-        notes=notes, incremental=incremental,
+    return _finish_apply(
+        inventory=inventory, ws=ws, output_dir=output_dir, review_dir=review_dir, catalog=catalog,
+        provider=provider, scan=scan, apply_sources=apply_sources, notes=notes, failed=failed,
+        qc=qc, naming_policy=naming_policy, state_registry=state_registry, write_manifest=write_manifest,
     )
 
 
-def _apply_state_transitions(
+def _name_of(scan: IncrementalScan, source_hash: str) -> str:
+    for d in scan.decisions:
+        if d.source.sha256 == source_hash:
+            return d.source.name
+    return source_hash[:12]
+
+
+def _failed_report(scan: IncrementalScan, failed: dict[str, str]) -> list[dict]:
+    return [{"source_file": _name_of(scan, h), "error": e} for h, e in failed.items()]
+
+
+def _incremental_manifest(
+    catalog: Catalog,
+    inventory: PersonInventory,
+    provider: DocumentVisionProvider,
+    scan: IncrementalScan,
+    qc: QCReport,
     *,
     mode: str,
-    qc: QCReport,
-    write_result: Optional[WriteResult],
-    documents: list[ClassifiedDocument],
-    ok_sources: list[SourceFile],
+    failed: dict[str, str],
+    notes: list[str],
     state_registry: StateRegistry,
-    ledger_path: Path,
-    manifest_path: Optional[Path],
-) -> None:
-    by_name = {s.name: s for s in ok_sources}
-
-    if mode == MODE_APPLY:
-        if write_result is not None and write_result.ok and qc.passed:
-            counts: dict[str, int] = {}
-            for d in documents:
-                counts[d.document.source_file] = counts.get(d.document.source_file, 0) + 1
-            for name, count in counts.items():
-                s = by_name.get(name)
-                if s is not None:
-                    state_registry.commit_processed(
-                        s.sha256, logical_document_count=count, manifest_path=str(ledger_path)
-                    )
-        elif write_result is not None and not write_result.ok:
-            pass  # đã mark_failed ngay khi phát hiện xung đột (fail-safe)
-        elif not qc.passed:
-            for s in ok_sources:
-                state_registry.mark_failed(s.sha256, error="QC (sau khi ghi) không đạt.")
-        return
-
-    # DRY-RUN.
-    if not qc.passed:
-        for s in ok_sources:
-            state_registry.mark_failed(
-                s.sha256,
-                error="QC (dry-run) không đạt: " + "; ".join(f"{c.name}: {c.detail}" for c in qc.failures),
-            )
-        return
-
-    per_source: dict[str, list[ClassifiedDocument]] = {}
-    for d in documents:
-        per_source.setdefault(d.document.source_file, []).append(d)
-    for name, docs in per_source.items():
-        s = by_name.get(name)
-        if s is None:
-            continue
-        if any(d.final_status == "REVIEW" for d in docs):
-            state_registry.mark_review_required(
-                s.sha256,
-                logical_document_count=len(docs),
-                manifest_path=str(manifest_path) if manifest_path else None,
-            )
-        else:
-            # Dry-run sạch (không có gì cần review) -> trở về NEW; không bịa
-            # thêm status thứ 6 ngoài 5 status bắt buộc.
-            state_registry.release(s.sha256)
-
-
-def _merge_ledger(previous: Optional[dict], new_manifest: dict, processed_source_names: set[str]) -> dict:
-    """Gộp ledger cũ (trừ các nguồn vừa xử lý lại) với kết quả lượt này.
-
-    Đảm bảo `output/<người>/_manifest.json` luôn là bản ghi TRUY VẾT ĐƯỢC đầy
-    đủ (AGENTS.md mục 8), không bị lượt chạy incremental sau ghi đè mất phần
-    của các nguồn đã xử lý ở lượt trước.
-    """
-    if previous is None:
-        return new_manifest
-    old_docs = [
-        d for d in previous.get("documents", []) if d.get("source_file") not in processed_source_names
+) -> dict:
+    docs = []
+    for row in state_registry.logical_documents_for_person(inventory.person_folder):
+        src_state = state_registry.get(row.source_hash)
+        docs.append(
+            {
+                "logical_document_id": row.logical_document_id,
+                "source_hash": row.source_hash,
+                "source_file": src_state.source_filename if src_state else None,
+                "source_pages": list(row.source_pages),
+                "type_id": row.effective_type_id,
+                "type_name_vi": catalog.name_vi(row.effective_type_id) if catalog.is_valid_classification(row.effective_type_id) and row.effective_type_id != "UNKNOWN" else None,
+                "document_date": row.effective_document_date,
+                "title_short": row.title_short,
+                "resolution_status": row.resolution_status,
+                "current_target_filename": row.current_target_filename,
+                # Alias tương thích ngược với app/state_import.py (đọc ledger cũ).
+                "target_file": row.current_target_filename,
+                "target_dir": row.target_dir,
+                "sequence_index": row.sequence_index,
+                "needs_review": row.resolution_status == "REVIEW_PENDING",
+                "review_reason": (row.classification_reasons or None) if row.resolution_status == "REVIEW_PENDING" else None,
+                "status": "REVIEW" if row.resolution_status == "REVIEW_PENDING" else "AUTO",
+            }
+        )
+    sources_list = [
+        {"file": s.source_filename, "sha256": s.source_hash, "pages": s.page_count}
+        for s in (state_registry.get(h) for h in {r.source_hash for r in state_registry.logical_documents_for_person(inventory.person_folder)})
+        if s is not None
     ]
-    merged_docs = old_docs + list(new_manifest.get("documents", []))
-    merged_targets = {**previous.get("targets", {}), **new_manifest.get("targets", {})}
-    merged = dict(new_manifest)
-    merged["documents"] = merged_docs
-    merged["targets"] = merged_targets
-    sources = new_manifest.get("sources", [])
-    merged["summary"] = {
-        "source_files": len(sources),
-        "source_pages": sum(s.get("pages", 0) for s in sources),
-        "logical_documents": len(merged_docs),
-        "auto": sum(1 for d in merged_docs if d.get("status") == "AUTO"),
-        "review": sum(1 for d in merged_docs if d.get("status") == "REVIEW"),
+    return {
+        "schema_version": "2.0-incremental",
+        "mode": mode,
+        "provider": provider.describe(),
+        "person_folder": inventory.person_folder,
+        "incremental": scan.as_dict(),
+        "same_date_tie_break": SAME_DATE_TIE_BREAK,
+        "sources": sources_list,
+        "documents": docs,
+        "summary": {
+            "logical_documents": len(docs),
+            "auto_resolved": sum(1 for d in docs if d["resolution_status"] == "AUTO_RESOLVED"),
+            "review_resolved": sum(1 for d in docs if d["resolution_status"] == "REVIEW_RESOLVED"),
+            "review_pending": sum(1 for d in docs if d["resolution_status"] == "REVIEW_PENDING"),
+        },
+        "qc": qc.as_dict(),
+        "failed_this_run": _failed_report(scan, failed),
+        "notes": notes,
     }
-    return merged
+
+
+def _finish_dry_run(
+    *, inventory, ws, catalog, provider, scan, qc, notes, failed, write_manifest, state_registry
+) -> PipelineResult:
+    manifest = _incremental_manifest(
+        catalog, inventory, provider, scan, qc, mode=MODE_DRY_RUN, failed=failed, notes=notes,
+        state_registry=state_registry,
+    )
+    manifest_path = None
+    if write_manifest:
+        manifest_path = _persist(manifest, ws, inventory.person_folder, MODE_DRY_RUN)
+
+    if not qc.passed:
+        status = "BLOCKED_QC"
+    elif manifest["summary"]["review_pending"] > 0:
+        status = "REVIEW_REQUIRED"
+    else:
+        status = "DRY_RUN_PASS"
+
+    return PipelineResult(
+        person_folder=inventory.person_folder, mode=MODE_DRY_RUN, inventory=inventory, documents=[],
+        qc=qc, manifest=manifest, manifest_path=manifest_path,
+        notes=notes or (["Không có nguồn mới cần xử lý."] if not scan.needs_agent_sources else []),
+        incremental=scan, status_override=status,
+    )
+
+
+def _finish_apply(
+    *, inventory, ws, output_dir, review_dir, catalog, provider, scan, apply_sources, notes, failed,
+    qc, naming_policy, state_registry, write_manifest,
+) -> PipelineResult:
+    person = inventory.person_folder
+
+    if not qc.passed:
+        manifest = _incremental_manifest(
+            catalog, inventory, provider, scan, qc, mode=MODE_APPLY, failed=failed,
+            notes=notes + ["QC (phân tích) không đạt -> không apply."], state_registry=state_registry,
+        )
+        path = _persist(manifest, ws, person, MODE_APPLY) if write_manifest else None
+        return PipelineResult(
+            person_folder=person, mode=MODE_APPLY, inventory=inventory, documents=[], qc=qc,
+            manifest=manifest, manifest_path=path, notes=notes, incremental=scan, status_override="BLOCKED_QC",
+        )
+
+    if not apply_sources:
+        manifest = _incremental_manifest(
+            catalog, inventory, provider, scan, qc, mode=MODE_APPLY, failed=failed, notes=notes,
+            state_registry=state_registry,
+        )
+        path = _persist(manifest, ws, person, MODE_APPLY) if write_manifest else None
+        return PipelineResult(
+            person_folder=person, mode=MODE_APPLY, inventory=inventory, documents=[], qc=qc,
+            manifest=manifest, manifest_path=path,
+            notes=notes or ["Không có nguồn mới cần xử lý."], incremental=scan, status_override="APPLY_PASS",
+        )
+
+    # 1) Loại type_id "active" (xuất hiện trong logical document settled của
+    #    các nguồn được apply lượt này).
+    active_types: set[str] = set()
+    for s in apply_sources:
+        for row in state_registry.logical_documents_for(s.sha256):
+            if row.is_settled:
+                active_types.add(row.effective_type_id)
+
+    # 2) Global assignment (Phase F/G) + rename plan (Phase H/I) cho mỗi type -
+    #    nhìn TOÀN BỘ hồ sơ người này, không chỉ apply_sources lượt này (vd
+    #    chèn tài liệu cũ hơn có thể phải đổi tên file của nguồn đã PROCESSED
+    #    từ trước).
+    all_ops = []
+    assignment_by_type: dict[str, list] = {}
+    unorderable_types: set[str] = set()
+    for type_id in sorted(active_types):
+        rows = [
+            r for r in state_registry.logical_documents_for_person(person, type_id=type_id) if r.is_settled
+        ]
+        nameable = [NameableDoc.from_row(r) for r in rows]
+        assignment, reasons = compute_global_assignment(catalog, type_id, nameable, naming_policy)
+        assignment_by_type[type_id] = assignment
+        if reasons:
+            unorderable_types.add(type_id)
+            notes.append(
+                f"Loại {type_id}: chưa xếp được thứ tự toàn cục ({', '.join(reasons)}) "
+                "-> giữ nguyên tên hiện có, chưa hoàn tất."
+            )
+            continue
+        current = {
+            r.logical_document_id: (r.current_target_filename, r.target_dir)
+            for r in rows if r.current_target_filename
+        }
+        all_ops.extend(build_rename_plan(current, assignment))
+
+    collisions = has_collisions(all_ops)
+    if collisions:
+        for s in apply_sources:
+            state_registry.mark_failed(
+                s.sha256, error="Xung đột kế hoạch đặt tên toàn cục: " + "; ".join(collisions)
+            )
+        qc.add("global_naming_plan", False, "; ".join(collisions))
+        manifest = _incremental_manifest(
+            catalog, inventory, provider, scan, qc, mode=MODE_APPLY, failed={**failed, **{s.sha256: "collision" for s in apply_sources}},
+            notes=notes, state_registry=state_registry,
+        )
+        path = _persist(manifest, ws, person, MODE_APPLY) if write_manifest else None
+        return PipelineResult(
+            person_folder=person, mode=MODE_APPLY, inventory=inventory, documents=[], qc=qc,
+            manifest=manifest, manifest_path=path, notes=notes, incremental=scan, status_override="BLOCKED_QC",
+        )
+
+    # 3) PDF nguồn cho các CREATE op (tài liệu hoàn toàn mới, chưa có file).
+    source_path_of: dict[str, Path] = {}
+    pages_of: dict[str, list[int]] = {}
+    for op in all_ops:
+        if op.kind != "CREATE":
+            continue
+        row = state_registry.get_logical_document(op.logical_document_id)
+        src_state = state_registry.get(row.source_hash)
+        src_file = inventory.by_name(src_state.source_filename)
+        source_path_of[op.logical_document_id] = src_file.path
+        pages_of[op.logical_document_id] = row.source_pages
+
+    # 4) Thực thi rename plan - fail-safe, không đổi gì cả nếu lỗi giữa chừng.
+    try:
+        if all_ops:
+            execute_rename_plan(
+                output_dir, review_dir, all_ops, source_path_of=source_path_of, pages_of=pages_of
+            )
+    except PipelineError as exc:
+        for s in apply_sources:
+            state_registry.mark_failed(s.sha256, error=f"Ghi/đổi tên file thất bại: {exc}")
+        qc.add("rename_execution", False, str(exc))
+        manifest = _incremental_manifest(
+            catalog, inventory, provider, scan, qc, mode=MODE_APPLY,
+            failed={**failed, **{s.sha256: str(exc) for s in apply_sources}}, notes=notes,
+            state_registry=state_registry,
+        )
+        path = _persist(manifest, ws, person, MODE_APPLY) if write_manifest else None
+        return PipelineResult(
+            person_folder=person, mode=MODE_APPLY, inventory=inventory, documents=[], qc=qc,
+            manifest=manifest, manifest_path=path, notes=notes, incremental=scan, status_override="BLOCKED_RUNTIME",
+        )
+
+    # 5) Ghi bản REVIEW_PENDING ra review/ (tên cách ly, không phải tên chính thức).
+    _write_review_copies(state_registry, catalog, inventory, apply_sources, review_dir)
+
+    # 6) Cập nhật DB target cho các logical document vừa xếp được thứ tự.
+    for type_id, assignment in assignment_by_type.items():
+        if type_id in unorderable_types:
+            continue
+        for a in assignment:
+            state_registry.set_target(
+                a.logical_document_id, target_filename=a.target_filename,
+                target_dir="output", sequence_index=a.sequence_index,
+            )
+
+    # 7) QC cuối: nguồn không đổi + file đầu ra đọc được đúng số trang.
+    mutations = verify_unchanged(inventory)
+    qc.add("source_unchanged", not mutations, "; ".join(mutations) or "SHA-256 file nguồn giữ nguyên")
+    output_problems = _verify_outputs(state_registry, apply_sources, output_dir, review_dir)
+    qc.add(
+        "outputs_readable", not output_problems,
+        "; ".join(output_problems) or "mọi file đầu ra mở được và đúng số trang",
+    )
+    qc.add("global_naming_plan", True, f"{len(all_ops)} thao tác đặt tên/đổi tên đã thực thi thành công")
+
+    # 8) Chuyển trạng thái từng nguồn: PROCESSED chỉ khi không còn REVIEW_PENDING
+    #    VÀ mọi logical document đã settled đều có filename chính thức.
+    if qc.passed:
+        for s in apply_sources:
+            rows = state_registry.logical_documents_for(s.sha256)
+            pending = [r for r in rows if r.resolution_status == "REVIEW_PENDING"]
+            all_settled_named = all(r.current_target_filename for r in rows if r.is_settled)
+            if not pending and all_settled_named:
+                state_registry.commit_processed(
+                    s.sha256, logical_document_count=len(rows), manifest_path=str(output_dir / "_manifest.json")
+                )
+
+    manifest = _incremental_manifest(
+        catalog, inventory, provider, scan, qc, mode=MODE_APPLY, failed=failed, notes=notes,
+        state_registry=state_registry,
+    )
+    manifest_path = None
+    if write_manifest:
+        manifest_path = _persist(manifest, ws, person, MODE_APPLY)
+        save_manifest(manifest, output_dir / "_manifest.json")
+
+    return PipelineResult(
+        person_folder=person, mode=MODE_APPLY, inventory=inventory, documents=[], qc=qc,
+        manifest=manifest, manifest_path=manifest_path, notes=notes, incremental=scan,
+        status_override="APPLY_PASS" if qc.passed else "BLOCKED_QC",
+    )
+
+
+def _write_review_copies(
+    state_registry: StateRegistry,
+    catalog: Catalog,
+    inventory: PersonInventory,
+    apply_sources: list[SourceFile],
+    review_dir: Path,
+) -> None:
+    for s in apply_sources:
+        for row in state_registry.logical_documents_for(s.sha256):
+            if row.resolution_status != "REVIEW_PENDING" or row.current_target_filename:
+                continue
+            name = review_filename(catalog, row.type_id, s.name, row.source_pages)
+            target = review_dir / name
+            target.parent.mkdir(parents=True, exist_ok=True)
+            if not target.is_file():
+                split_pages(s.path, row.source_pages, target)
+            state_registry.set_target(
+                row.logical_document_id, target_filename=name, target_dir="review", sequence_index=None
+            )
+
+
+def _verify_outputs(
+    state_registry: StateRegistry, apply_sources: list[SourceFile], output_dir: Path, review_dir: Path
+) -> list[str]:
+    problems: list[str] = []
+    for s in apply_sources:
+        for row in state_registry.logical_documents_for(s.sha256):
+            if not row.current_target_filename:
+                continue
+            base = output_dir if row.target_dir == "output" else review_dir
+            path = base / row.current_target_filename
+            if not path.is_file():
+                problems.append(f"Thiếu file đầu ra: {path}")
+                continue
+            try:
+                n = len(PdfReader(str(path)).pages)
+            except Exception as exc:
+                problems.append(f"Không mở được file đầu ra '{path.name}': {exc}")
+                continue
+            if n != len(row.source_pages):
+                problems.append(f"'{path.name}' có {n} trang, kỳ vọng {len(row.source_pages)}.")
+    return problems
 
 
 FLAG_AGENT_SEGMENTATION_MISMATCH = "AGENT_SEGMENTATION_MISMATCH"

@@ -1,16 +1,21 @@
 """Phase A+ — Incremental scan: đối chiếu inventory hiện tại với state registry.
 
-Quyết định file nào Agent cần đọc (NEW) và file nào SKIP. Module này CHỈ đọc
-SHA-256 (đã có sẵn từ pdf_inventory) và tra registry — KHÔNG mở nội dung PDF,
-KHÔNG gọi provider. An toàn để dùng cho lệnh `status` (read-only, không mutate
-registry).
+Quyết định file nào Agent cần đọc (NEW/STALE) và file nào SKIP (dùng cache
+hoặc đã PROCESSED). Module này CHỈ đọc SHA-256 (đã có sẵn từ pdf_inventory) và
+tra registry — KHÔNG mở nội dung PDF, KHÔNG gọi provider. An toàn dùng cho
+lệnh `status` (read-only, không mutate registry).
 
 Khóa nhận diện là SHA-256, không phải filename:
   - cùng hash, khác tên/khác đường dẫn -> vẫn là cùng một nguồn, không đọc lại.
-  - cùng tên, khác hash -> nguồn MỚI (NEW_SOURCE_VERSION), phải xử lý.
+  - cùng tên, khác hash -> nguồn MỚI, phải xử lý.
   - nhiều file cùng hash trong một lần scan -> chỉ 1 bản canonical (tên nhỏ
-    nhất theo alphabet để deterministic), các bản còn lại là DUPLICATE_SOURCE
-    và không bao giờ được xử lý.
+    nhất theo alphabet để deterministic), các bản còn lại là DUPLICATE_SOURCE.
+
+Hai khái niệm tách biệt (xem app/state.py):
+  - AI đã đọc/phân tích xong (ANALYZED_PENDING_APPLY/REVIEW_REQUIRED) - nếu
+    fingerprint (taxonomy/schema) còn khớp thì TÁI SỬ DỤNG, Agent không đọc lại.
+  - Nghiệp vụ đã hoàn tất (PROCESSED) - chỉ khi mọi logical document đã được
+    giải quyết + apply thành công + QC PASS.
 """
 from __future__ import annotations
 
@@ -18,10 +23,12 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Optional
 
+from .fingerprint import Fingerprint
 from .manifest import load_manifest
 from .models import MODE_APPLY
 from .pdf_inventory import PersonInventory, SourceFile
 from .state import (
+    STATUS_ANALYZED_PENDING_APPLY,
     STATUS_FAILED,
     STATUS_PROCESSED,
     STATUS_PROCESSING,
@@ -31,27 +38,27 @@ from .state import (
 )
 
 DECISION_NEW = "NEW"
+DECISION_STALE_ANALYSIS = "STALE_ANALYSIS"
+DECISION_CACHED_PENDING_APPLY = "CACHED_PENDING_APPLY"
+DECISION_CACHED_REVIEW_REQUIRED = "CACHED_REVIEW_REQUIRED"
 DECISION_ALREADY_PROCESSED = "ALREADY_PROCESSED"
-DECISION_REVIEW_PENDING = "REVIEW_PENDING"
 DECISION_FAILED_PREVIOUSLY = "FAILED_PREVIOUSLY"
 DECISION_INTERRUPTED = "INTERRUPTED"
 DECISION_DUPLICATE_SOURCE = "DUPLICATE_SOURCE"
 
-_STATUS_TO_DECISION = {
-    STATUS_PROCESSING: DECISION_INTERRUPTED,
-    STATUS_PROCESSED: DECISION_ALREADY_PROCESSED,
-    STATUS_REVIEW_REQUIRED: DECISION_REVIEW_PENDING,
-    STATUS_FAILED: DECISION_FAILED_PREVIOUSLY,
-}
-
 ALL_DECISIONS = (
     DECISION_NEW,
+    DECISION_STALE_ANALYSIS,
+    DECISION_CACHED_PENDING_APPLY,
+    DECISION_CACHED_REVIEW_REQUIRED,
     DECISION_ALREADY_PROCESSED,
-    DECISION_REVIEW_PENDING,
     DECISION_FAILED_PREVIOUSLY,
     DECISION_INTERRUPTED,
     DECISION_DUPLICATE_SOURCE,
 )
+
+# Quyết định coi là "đã có cache phân tích hợp lệ, Agent KHÔNG cần đọc lại".
+CACHED_DECISIONS = (DECISION_CACHED_PENDING_APPLY, DECISION_CACHED_REVIEW_REQUIRED)
 
 
 @dataclass
@@ -61,7 +68,8 @@ class SourceDecision:
     record: Optional[SourceState] = None
     duplicate_of_hash: Optional[str] = None
     duplicate_of_name: Optional[str] = None
-    will_process: bool = False
+    needs_agent: bool = False  # Agent phải đọc PDF (NEW/STALE/retry)
+    needs_apply: bool = False  # cần chạy naming+write khi apply (mọi ca trừ SKIP hẳn)
     output_mismatch: bool = False
     output_mismatch_detail: Optional[str] = None
 
@@ -69,7 +77,8 @@ class SourceDecision:
         return {
             "source_file": self.source.name,
             "decision": self.decision,
-            "will_process": self.will_process,
+            "needs_agent": self.needs_agent,
+            "needs_apply": self.needs_apply,
             "output_mismatch": self.output_mismatch,
             "output_mismatch_detail": self.output_mismatch_detail,
             "duplicate_of": self.duplicate_of_name,
@@ -82,8 +91,17 @@ class IncrementalScan:
     decisions: list[SourceDecision] = field(default_factory=list)
 
     @property
+    def needs_agent_sources(self) -> list[SourceFile]:
+        return [d.source for d in self.decisions if d.needs_agent]
+
+    @property
+    def needs_apply_sources(self) -> list[SourceFile]:
+        return [d.source for d in self.decisions if d.needs_apply]
+
+    # Tương thích ngược với tên cũ (được vài chỗ/test tham chiếu).
+    @property
     def to_process(self) -> list[SourceFile]:
-        return [d.source for d in self.decisions if d.will_process]
+        return self.needs_agent_sources
 
     def counts(self) -> dict[str, int]:
         out = {d: 0 for d in ALL_DECISIONS}
@@ -106,11 +124,15 @@ class IncrementalScan:
             "",
             f"PDF hiện có: {len(self.decisions)}",
             "",
-            f"Đã xử lý trước: {c[DECISION_ALREADY_PROCESSED]} -> SKIP",
+            f"Đã hoàn tất trước: {c[DECISION_ALREADY_PROCESSED]} -> SKIP",
             f"Mới bổ sung: {c[DECISION_NEW]}",
         ]
-        if c[DECISION_REVIEW_PENDING]:
-            lines.append(f"Đang chờ review: {c[DECISION_REVIEW_PENDING]}")
+        if c[DECISION_STALE_ANALYSIS]:
+            lines.append(f"Cache hết hạn (taxonomy/schema đổi): {c[DECISION_STALE_ANALYSIS]}")
+        if c[DECISION_CACHED_PENDING_APPLY]:
+            lines.append(f"Đã phân tích, chờ apply: {c[DECISION_CACHED_PENDING_APPLY]}")
+        if c[DECISION_CACHED_REVIEW_REQUIRED]:
+            lines.append(f"Đang chờ review: {c[DECISION_CACHED_REVIEW_REQUIRED]}")
         if c[DECISION_FAILED_PREVIOUSLY]:
             lines.append(f"Lỗi cũ: {c[DECISION_FAILED_PREVIOUSLY]}")
         if c[DECISION_INTERRUPTED]:
@@ -120,7 +142,7 @@ class IncrementalScan:
         mismatches = [d for d in self.decisions if d.output_mismatch]
         if mismatches:
             lines.append("")
-            lines.append("CẢNH BÁO STATE_OUTPUT_MISMATCH (state nói PROCESSED nhưng thiếu file):")
+            lines.append("CẢNH BÁO STATE_OUTPUT_MISMATCH:")
             for d in mismatches:
                 lines.append(f"  - {d.source.name}: {d.output_mismatch_detail}")
         return "\n".join(lines)
@@ -152,6 +174,7 @@ def scan_person_folder(
     registry: StateRegistry,
     *,
     mode: str,
+    fingerprint: Fingerprint,
     retry_review: bool = False,
     retry_failed: bool = False,
     output_dir: Optional[Path] = None,
@@ -163,7 +186,6 @@ def scan_person_folder(
 
     decisions: list[SourceDecision] = []
     for h, files in by_hash.items():
-        # Thứ tự deterministic: không phụ thuộc thứ tự filesystem/scan.
         files_sorted = sorted(files, key=lambda f: f.name.casefold())
         canonical = files_sorted[0]
         record = registry.get(h)
@@ -172,52 +194,78 @@ def scan_person_folder(
             if f is not canonical:
                 decisions.append(
                     SourceDecision(
-                        source=f,
-                        decision=DECISION_DUPLICATE_SOURCE,
-                        record=record,
-                        duplicate_of_hash=h,
-                        duplicate_of_name=canonical.name,
-                        will_process=False,
+                        source=f, decision=DECISION_DUPLICATE_SOURCE, record=record,
+                        duplicate_of_hash=h, duplicate_of_name=canonical.name,
                     )
                 )
                 continue
+            decisions.append(_decide_canonical(f, record, fingerprint, mode, retry_review, retry_failed, output_dir, review_dir))
 
-            if record is None:
-                decisions.append(SourceDecision(source=f, decision=DECISION_NEW, will_process=True))
-                continue
-
-            decision = _STATUS_TO_DECISION[record.status]
-            will_process = False
-            if decision == DECISION_REVIEW_PENDING:
-                # Apply là hành động "làm thật": phải xử lý để thực sự ghi file
-                # review/ ra đĩa. Dry-run thường thì SKIP, trừ khi có --retry-review.
-                will_process = retry_review or (mode == MODE_APPLY)
-            elif decision in (DECISION_FAILED_PREVIOUSLY, DECISION_INTERRUPTED):
-                # Lỗi kỹ thuật/gián đoạn luôn cần người vận hành yêu cầu rõ,
-                # kể cả khi đang apply — không tự động retry vô hạn.
-                will_process = retry_failed
-            # DECISION_ALREADY_PROCESSED: will_process luôn False, không có cờ nào bật lại.
-
-            mismatch, detail = False, None
-            if (
-                decision == DECISION_ALREADY_PROCESSED
-                and output_dir is not None
-                and review_dir is not None
-            ):
-                mismatch, detail = _check_output_mismatch(record, f, output_dir, review_dir)
-
-            decisions.append(
-                SourceDecision(
-                    source=f,
-                    decision=decision,
-                    record=record,
-                    will_process=will_process,
-                    output_mismatch=mismatch,
-                    output_mismatch_detail=detail,
-                )
-            )
-
-    # Giữ đúng thứ tự ổn định của inventory (đã sort theo tên trong pdf_inventory).
     order = {id(s): i for i, s in enumerate(inventory.sources)}
     decisions.sort(key=lambda d: order[id(d.source)])
     return IncrementalScan(person_folder=inventory.person_folder, decisions=decisions)
+
+
+def _decide_canonical(
+    f: SourceFile,
+    record: Optional[SourceState],
+    fingerprint: Fingerprint,
+    mode: str,
+    retry_review: bool,
+    retry_failed: bool,
+    output_dir: Optional[Path],
+    review_dir: Optional[Path],
+) -> SourceDecision:
+    if record is None:
+        return SourceDecision(source=f, decision=DECISION_NEW, needs_agent=True, needs_apply=(mode == MODE_APPLY))
+
+    if record.status == STATUS_PROCESSING:
+        # Còn sót PROCESSING từ lượt trước -> tiến trình bị gián đoạn giữa chừng.
+        retry = retry_failed
+        return SourceDecision(
+            source=f, decision=DECISION_INTERRUPTED, record=record,
+            needs_agent=retry, needs_apply=(retry and mode == MODE_APPLY),
+        )
+
+    if record.status == STATUS_FAILED:
+        retry = retry_failed
+        return SourceDecision(
+            source=f, decision=DECISION_FAILED_PREVIOUSLY, record=record,
+            needs_agent=retry, needs_apply=(retry and mode == MODE_APPLY),
+        )
+
+    if record.status == STATUS_PROCESSED:
+        mismatch, detail = (False, None)
+        if output_dir is not None and review_dir is not None:
+            mismatch, detail = _check_output_mismatch(record, f, output_dir, review_dir)
+        return SourceDecision(
+            source=f, decision=DECISION_ALREADY_PROCESSED, record=record,
+            output_mismatch=mismatch, output_mismatch_detail=detail,
+        )
+
+    if record.status in (STATUS_ANALYZED_PENDING_APPLY, STATUS_REVIEW_REQUIRED):
+        stale = not fingerprint.matches_cache(
+            record.taxonomy_version or "", record.analysis_schema_version or ""
+        )
+        if stale:
+            return SourceDecision(
+                source=f, decision=DECISION_STALE_ANALYSIS, record=record,
+                needs_agent=True, needs_apply=(mode == MODE_APPLY),
+            )
+        decision = (
+            DECISION_CACHED_REVIEW_REQUIRED
+            if record.status == STATUS_REVIEW_REQUIRED
+            else DECISION_CACHED_PENDING_APPLY
+        )
+        # Cache còn tươi -> Agent KHÔNG đọc lại mặc định, kể cả khi apply. Chỉ
+        # đọc lại nếu người vận hành yêu cầu rõ (--retry-review) - vd muốn Agent
+        # nhìn lại toàn bộ thay vì chỉ dựa vào phần người dùng đã resolve tay.
+        needs_agent = decision == DECISION_CACHED_REVIEW_REQUIRED and retry_review
+        # Apply LUÔN xử lý nguồn có cache (để ghi/hoàn tất phần đã resolve -
+        # Phase E) bất kể REVIEW_REQUIRED hay PENDING_APPLY.
+        needs_apply = mode == MODE_APPLY
+        return SourceDecision(
+            source=f, decision=decision, record=record, needs_agent=needs_agent, needs_apply=needs_apply,
+        )
+
+    raise AssertionError(f"status không xử lý được: {record.status}")  # pragma: no cover

@@ -21,15 +21,27 @@ python -m app.cli status "input/<TEN_NGUOI>"
 ```
 
 Lệnh này chỉ đọc SHA-256 + state registry cục bộ (`state/processing_state.db`),
-KHÔNG mở nội dung PDF. Kết quả phân loại từng file thành:
-`NEW` · `PROCESSED` (SKIP) · `REVIEW_REQUIRED` (SKIP) · `FAILED` (SKIP) ·
-`INTERRUPTED` (SKIP) · `DUPLICATE_SOURCE` (SKIP).
+KHÔNG mở nội dung PDF. Sáu trạng thái một nguồn có thể ở:
 
-**Bạn chỉ được đọc bằng Vision những file `NEW`**, hoặc file người vận hành
-yêu cầu retry rõ ràng (`retry review` / `retry failed`). **Không đọc lại PDF
-đã `PROCESSED`.** `python -m app.cli process "input/<TEN_NGUOI>"` tự động áp
+| Trạng thái | Ý nghĩa | Agent đọc lại PDF? |
+|---|---|---|
+| `NEW` | chưa từng phân tích | **Có** |
+| `STALE_ANALYSIS` | đã phân tích nhưng taxonomy/schema đã đổi từ đó | **Có** (cache không còn tin cậy) |
+| `ANALYZED_PENDING_APPLY` | đã phân tích xong, không có gì cần review, chưa apply | Không — dùng cache |
+| `REVIEW_REQUIRED` | đã phân tích xong nhưng còn logical document cần người chốt | Không, trừ khi người vận hành nói `retry review` |
+| `PROCESSED` | nghiệp vụ đã hoàn tất (apply xong + hết review treo + QC PASS) | Không, tuyệt đối |
+| `FAILED` / `INTERRUPTED` | lỗi kỹ thuật / tiến trình từng bị gián đoạn | Không, trừ khi người vận hành nói `retry failed` |
+| `DUPLICATE_SOURCE` | trùng nội dung với file khác đã/sẽ xử lý | Không, vĩnh viễn |
+
+**Chỉ đọc bằng Vision file `NEW`/`STALE_ANALYSIS`, hoặc file người vận hành yêu
+cầu retry rõ ràng.** `python -m app.cli process "input/<TEN_NGUOI>"` tự động áp
 dụng đúng luật này — chỉ cần chạy nó, không cần tự lọc file bằng tay; luật này
 tồn tại để bạn HIỂU vì sao lệnh đó không xin phân tích lại những file cũ.
+
+**Quan trọng:** "AI đã đọc xong" (`ANALYZED_PENDING_APPLY`/`REVIEW_REQUIRED`)
+và "nghiệp vụ đã xong" (`PROCESSED`) là HAI KHÁI NIỆM KHÁC NHAU. Một nguồn có
+tài liệu REVIEW không bao giờ tự thành `PROCESSED` chỉ vì đã apply/copy ra
+`review/` — phải chờ người vận hành chốt bằng `resolve-review` (mục 8).
 
 Nếu `status` báo `STATE_OUTPUT_MISMATCH` (state nói đã xử lý nhưng file đầu ra
 bị thiếu): báo cho người vận hành, **không tự tạo lại**, không tự đoán nguyên nhân.
@@ -63,39 +75,50 @@ bị thiếu): báo cho người vận hành, **không tự tạo lại**, khôn
    `70` = bằng/chứng chỉ **lý luận chính trị**. `86` = văn bằng/chứng chỉ chuyên môn,
    nghiệp vụ, ngoại ngữ, tin học, bồi dưỡng. Không khớp rõ → REVIEW, **không ép nhãn**.
 
-## 4. Đặt tên
+## 4. Đặt tên (global, nhìn TOÀN BỘ hồ sơ)
 
 9. **Không tự nghĩ filename.** Không gửi `target_file`, `filename`, `sequence`, `status`.
    Tên file do naming engine local sinh từ `document_types.json`. JSON có khóa dạng đó sẽ bị từ chối.
+10. Đánh số `.1/.2/...` cho nhiều tài liệu cùng `type_id` nhìn **TOÀN BỘ** tài liệu
+    đã biết của một người (mọi nguồn, mọi lượt chạy trước), không chỉ lượt hiện
+    tại. Thêm một tài liệu cũ hơn có thể khiến các file `.1/.2/...` **đã ghi từ
+    trước bị đổi tên** (không phải đổi nội dung) để đúng thứ tự thời gian — đây
+    là hành vi ĐÚNG của hệ thống, không phải lỗi.
+11. **Không dùng thứ tự scan/liệt kê file làm mốc thời gian.** Hai tài liệu
+    trùng ngày được xếp bằng tie-break xác định (tiêu đề chuẩn hoá -> mã băm
+    nguồn -> số trang), không đoán "cái nào có trước".
+12. Runtime Agent **không được tự sửa chính sách đặt tên/global naming** (không
+    đổi thứ tự ưu tiên tie-break, không tự chọn cách renumber khác).
 
 ## 5. Bảo toàn hồ sơ
 
-10. **Không sửa, đổi tên, di chuyển hay xóa PDF trong `input/`.** Chỉ đọc.
+13. **Không sửa, đổi tên, di chuyển hay xóa PDF trong `input/`.** Chỉ đọc.
     Trạng thái "đã xử lý" được lưu ở `state/processing_state.db` (SQLite local,
     khóa bằng SHA-256) — **không** ghi metadata, watermark, chữ `PROCESSED`,
-    hay annotation vào chính file PDF để đánh dấu.
-11. Không sửa `AGENTS.md`.
-12. Không sửa `document_types.json`.
-13. Không sửa `test_cases/*` (golden tests) và `fixtures/*`.
-14. Không tự hạ ngưỡng confidence, không tự đổi chính sách AUTO/REVIEW.
+    hay annotation vào chính file PDF để đánh dấu. Global naming (mục 4) chỉ được
+    phép đổi tên file trong `output/`/`review/` — **không bao giờ** đụng tới `input/`.
+14. Không sửa `AGENTS.md`.
+15. Không sửa `document_types.json`.
+16. Không sửa `test_cases/*` (golden tests) và `fixtures/*`.
+17. Không tự hạ ngưỡng confidence, không tự đổi chính sách AUTO/REVIEW.
 
 ## 6. Khi không chắc
 
-15. **Không chắc → REVIEW. Không đoán.** Đặt `needs_review: true` kèm `review_reason` ngắn.
+18. **Không chắc → REVIEW. Không đoán.** Đặt `needs_review: true` kèm `review_reason` ngắn.
     Cụ thể: không đọc được loại; rơi vào cặp dễ nhầm mà không tách bạch được;
-    không rõ ranh giới tài liệu; nhiều tài liệu cùng loại mà không xác định được thứ tự thời gian.
-    Ngày văn bản chỉ ghi khi đọc được chắc chắn — chỉ thấy năm thì để `document_date: null`,
-    **không suy diễn ngày/tháng**.
-16. **Runtime Agent không sửa source code**, không sửa test, không tự triển khai logic mới
-    khi gặp ca lạ. Ca lạ → báo `REVIEW_REQUIRED` và ghi nhận để DEV mode xử lý.
-17. **Không upload tài liệu ra bất kỳ dịch vụ nào ngoài luồng đã được người vận hành phê duyệt.**
+    không rõ ranh giới tài liệu. Ngày văn bản chỉ ghi khi đọc được chắc chắn —
+    chỉ thấy năm thì để `document_date: null`, **không suy diễn ngày/tháng**.
+19. **Runtime Agent không sửa source code**, không sửa test, không sửa schema state DB,
+    không tự triển khai logic mới khi gặp ca lạ. Ca lạ → báo `REVIEW_REQUIRED` và
+    ghi nhận để DEV mode xử lý.
+20. **Không upload tài liệu ra bất kỳ dịch vụ nào ngoài luồng đã được người vận hành phê duyệt.**
     Pipeline local không gọi API AI qua mạng; đừng thêm.
-18. **Không ghi toàn văn hồ sơ hay dữ liệu cá nhân không cần thiết vào log**, chat hay JSON.
+21. **Không ghi toàn văn hồ sơ hay dữ liệu cá nhân không cần thiết vào log**, chat hay JSON.
     `title_short` tối đa 200 ký tự; `notes`/`review_reason` tối đa 300 ký tự.
 
 ## 7. Đầu ra của bạn
 
-Mỗi PDF nguồn → một file JSON:
+Mỗi PDF nguồn `NEW`/`STALE_ANALYSIS` → một file JSON:
 
 ```
 analysis/<TEN_NGUOI>/<ten_pdf_khong_duoi>.json
@@ -108,3 +131,23 @@ python -m app.cli process "input/<TEN_NGUOI>"
 ```
 
 Mặc định là **dry-run**. Chỉ chạy `--apply` khi người vận hành yêu cầu rõ bằng chữ `apply`.
+
+## 8. Chốt REVIEW không cần đọc lại PDF
+
+Khi `status`/`process` báo có logical document `REVIEW_PENDING`, liệt kê chi tiết:
+
+```
+python -m app.cli review-list "input/<TEN_NGUOI>"
+```
+
+Người vận hành chốt loại/ngày đúng — Agent **KHÔNG được tự resolve thay người
+vận hành**, chỉ được trình bày lựa chọn và chờ quyết định rõ ràng:
+
+```
+python -m app.cli resolve-review <logical_document_id> --type-id <mã> [--date yyyy-mm-dd]
+```
+
+Lệnh này KHÔNG đọc lại PDF — chỉ ghi quyết định vào state DB. Sau đó `process
+... --apply` sẽ tính lại tên file (mục 4) và ghi file thật. Nguồn chỉ chuyển
+sang `PROCESSED` khi **mọi** logical document của nó đã được giải quyết (AUTO
+hoặc REVIEW đã resolve) **và** apply thành công **và** QC PASS.

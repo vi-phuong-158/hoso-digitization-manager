@@ -20,9 +20,11 @@ Muốn đổi logic/ngưỡng/taxonomy phải do người vận hành mở DEV m
 
 ## Bạn ĐƯỢC PHÉP
 
-- Đọc PDF trong `input/<TEN_NGUOI>/` (chỉ đọc) — **nhưng chỉ những file `NEW`**
-  theo `python -m app.cli status "input/<TEN_NGUOI>"` (xem Bước 0), hoặc file
-  người vận hành yêu cầu retry rõ ràng.
+- Đọc PDF trong `input/<TEN_NGUOI>/` (chỉ đọc) — **nhưng chỉ những file
+  `NEW`/`STALE_ANALYSIS`** theo `python -m app.cli status "input/<TEN_NGUOI>"`
+  (xem Bước 0), hoặc file người vận hành yêu cầu retry rõ ràng.
+- Trình bày các logical document `REVIEW_PENDING` (`review-list`) để người vận
+  hành chọn — nhưng KHÔNG tự chọn thay.
 - Quan sát **từng trang**, không bỏ trang nào.
 - Xác định `page_role`: `CONTENT` | `COVER` | `BACK_SIDE` | `CONTINUATION` | `BLANK`.
 - Xác định ranh giới **logical document** (một PDF có thể chứa nhiều tài liệu).
@@ -45,8 +47,12 @@ Muốn đổi logic/ngưỡng/taxonomy phải do người vận hành mở DEV m
 - Tự triển khai logic mới khi gặp case lạ.
 - Gửi tài liệu ra dịch vụ ngoài luồng đã được phê duyệt.
 - Ghi toàn văn hồ sơ vào log/chat/JSON.
-- **Đọc lại (bằng Vision) PDF đã `PROCESSED`** theo state registry.
+- **Đọc lại (bằng Vision) PDF đã có cache hợp lệ** (`PROCESSED`, `ANALYZED_PENDING_APPLY`,
+  `REVIEW_REQUIRED` khi fingerprint chưa đổi) theo state registry.
 - Đánh dấu "đã xử lý" bằng cách sửa/ghi chú vào chính PDF (metadata, watermark...).
+- **Tự resolve một logical document `REVIEW_PENDING`** thay người vận hành.
+- Sửa schema state DB (`app/state.py`) hoặc tự đổi chính sách global naming.
+- Renumber/apply khi người vận hành **chưa yêu cầu rõ**.
 
 **Gặp case lạ → `REVIEW_REQUIRED`. Không tự vá code.**
 
@@ -65,12 +71,19 @@ Chỉ đọc SHA-256 + `state/processing_state.db`, không mở nội dung PDF. 
 | Trạng thái | Bạn làm gì |
 |---|---|
 | `NEW` | Đọc bằng Vision (Bước 1-5) |
-| `PROCESSED` | **SKIP** — không đọc lại, không phân tích lại |
-| `REVIEW_REQUIRED` | SKIP mặc định; chỉ đọc lại nếu người vận hành nói "retry review" |
+| `STALE_ANALYSIS` | Đọc lại bằng Vision — cache cũ không còn tin cậy (taxonomy/schema đã đổi) |
+| `ANALYZED_PENDING_APPLY` | **SKIP Vision** — đã có phân tích hợp lệ, chỉ chờ apply |
+| `REVIEW_REQUIRED` | SKIP Vision mặc định; chỉ đọc lại nếu người vận hành nói "retry review" |
+| `PROCESSED` | **SKIP tuyệt đối** — không đọc lại, không phân tích lại, nghiệp vụ đã xong |
 | `FAILED` / `INTERRUPTED` | SKIP mặc định; chỉ đọc lại nếu người vận hành nói "retry failed" |
 | `DUPLICATE_SOURCE` | SKIP vĩnh viễn — nội dung trùng file khác đã/sẽ được xử lý |
 
 Nếu thấy `STATE_OUTPUT_MISMATCH`: báo người vận hành, dừng, không tự sửa.
+
+**Lưu ý:** `ANALYZED_PENDING_APPLY`/`REVIEW_REQUIRED` nghĩa là AI đã đọc xong,
+KHÔNG có nghĩa nghiệp vụ đã xong (đó là `PROCESSED`). Một nguồn còn review treo
+sẽ đứng ở `REVIEW_REQUIRED` mãi cho tới khi người vận hành `resolve-review`
+(Bước 8) — kể cả sau khi đã `apply`.
 
 ### Bước 1 — Inventory
 
@@ -112,29 +125,44 @@ Không khớp rõ mô tả loại nào → hạ `confidence`, đặt `needs_revi
 Một file cho mỗi PDF: `analysis/<TEN_NGUOI>/<ten_pdf_khong_duoi>.json`.
 Đúng schema ở phần dưới. Sai một điểm là validator local sẽ từ chối — đó là chủ ý.
 
-### Bước 6 — Dry-run
+### Bước 6 — Dry-run + freeze + global naming preview
 
 ```
 python -m app.cli process "input/<TEN_NGUOI>"
 ```
 
-Nếu validator báo lỗi hợp đồng: **sửa JSON của bạn**, không sửa code.
+Nếu validator báo lỗi hợp đồng: **sửa JSON của bạn**, không sửa code. Khi qua
+được validator, kết quả phân tích được "đóng băng" vào state DB
+(`ANALYZED_PENDING_APPLY`/`REVIEW_REQUIRED`) kèm fingerprint — lượt sau không
+cần Vision đọc lại nếu fingerprint còn khớp (mục 0 của rule). Dry-run cũng cho
+biết trước tài liệu mới sẽ được đặt tên gì (đã tính global — mục 4 của rule),
+kể cả khi việc đó có thể đổi tên file đã ghi trước đó của tài liệu cùng loại.
 
 ### Bước 7 — Trình bày
 
 Báo cho người vận hành: số file, số trang, số logical document, AUTO, REVIEW
 (kèm lý do), kết quả QC, trạng thái cuối.
 
-### Bước 8 — Apply (chỉ khi được yêu cầu rõ)
+### Bước 8 — Resolve REVIEW (nếu có, chỉ khi người vận hành quyết định)
+
+```
+python -m app.cli review-list "input/<TEN_NGUOI>"
+python -m app.cli resolve-review <logical_document_id> --type-id <mã> [--date yyyy-mm-dd]
+```
+
+Không tự chọn type/date thay người vận hành. Không cần đọc lại PDF ở bước này.
+
+### Bước 9 — Apply (chỉ khi được yêu cầu rõ)
 
 ```
 python -m app.cli process "input/<TEN_NGUOI>" --apply
 ```
 
-Apply luôn xử lý cả các nguồn đang `REVIEW_REQUIRED` (để thực sự ghi file ra
-`review/`), nhưng KHÔNG tự retry `FAILED`/`INTERRUPTED` — chỉ khi người vận
-hành nói rõ `retry failed` mới thêm cờ `--retry-failed`. Tương tự, dry-run chỉ
-đọc lại `REVIEW_REQUIRED` khi người vận hành nói `retry review`
+Apply luôn xử lý cả các nguồn đang `ANALYZED_PENDING_APPLY`/`REVIEW_REQUIRED`
+(để thực sự ghi file, kể cả renumber file cũ nếu global naming cần) — nhưng
+KHÔNG tự chốt review chưa resolve, và KHÔNG tự retry `FAILED`/`INTERRUPTED` —
+chỉ khi người vận hành nói rõ `retry failed` mới thêm cờ `--retry-failed`.
+Dry-run chỉ đọc lại `REVIEW_REQUIRED` khi người vận hành nói `retry review`
 (`--retry-review`).
 
 ---

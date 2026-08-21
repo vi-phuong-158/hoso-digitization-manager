@@ -1,42 +1,45 @@
 # LIMITATIONS.md — Giới hạn còn lại
 
-Cập nhật sau vòng **Incremental processing** (state registry SQLite local).
+Cập nhật sau vòng **State semantics + Global cross-run naming**.
 
-Trạng thái: 198 unit test xanh (151 cũ + 47 mới cho state/incremental); golden
-acceptance xanh với cả provider `fixture` lẫn `agent`.
+Trạng thái: 225 unit test xanh; golden acceptance xanh với cả provider `fixture`
+lẫn `agent`.
 
 ---
 
-## -1. Giới hạn mới: đánh số `.1/.2/...` chỉ trong phạm vi MỘT lượt chạy
+## -1. Giới hạn còn lại của global naming (đã thu hẹp, chưa hết hẳn)
 
-Naming engine (`app/naming.py`) không đổi — vẫn deterministic, vẫn đánh số cũ→mới
-theo ngày. Nhưng với incremental processing, mỗi lượt `process`/`apply` chỉ gom
-các tài liệu **mới được xử lý trong chính lượt đó** để tính thứ tự `.1/.2/...`,
-KHÔNG biết tới các tài liệu cùng loại đã `PROCESSED` từ lượt trước.
+Vòng trước, đánh số `.1/.2/...` chỉ tính trong PHẠM VI MỘT LƯỢT CHẠY, khiến thêm
+tài liệu cùng loại ở lượt sau luôn va vào file cũ và bị `BLOCKED_RUNTIME`. Vòng
+này đã sửa tận gốc: `app/global_naming.py` tính thứ tự nhìn **toàn bộ** logical
+document đã biết của một người (đọc từ `logical_documents` trong state DB), kể
+cả từ các nguồn đã `PROCESSED` ở lượt trước — chèn tài liệu cũ hơn vào giữa sẽ
+tự động **đổi tên** (không đổi nội dung) các file liên quan, thực thi bằng kế
+hoạch rename 2 pha fail-safe (`execute_rename_plan`).
 
-Hệ quả: nếu lượt 1 apply một tài liệu loại `04` (ra file bare `04.xxx.pdf`), rồi
-lượt 2 (sau khi thêm PDF mới) cũng có đúng một tài liệu loại `04` MỚI, lượt 2 sẽ
-tính nó là "tài liệu duy nhất loại 04 trong lượt này" và cũng thử đặt tên
-`04.xxx.pdf` — trùng với file lượt 1 đã ghi.
+Còn lại 2 điểm chưa xử lý, cả hai đều dừng an toàn (không âm thầm sai) thay vì
+tự động giải quyết:
 
-**Đây không phải lỗi âm thầm.** Cơ chế content-key trong `writer.py` phát hiện
-tên trùng nhưng nội dung nguồn khác nhau → báo xung đột → `BLOCKED_RUNTIME`,
-không ghi đè, nguồn đó thành `FAILED` (không tự retry). Đã có test chuyên biệt
-xác nhận hành vi chặn an toàn này:
-`tests/test_incremental_pipeline.py::test_nhieu_tai_lieu_cung_loai_qua_nhieu_lan_apply_bi_chan_an_toan`.
-
-**Việc cần làm tiếp (DEV mode, cần người vận hành chốt trước):** thiết kế cách
-naming engine biết về sequence đã dùng của các lượt trước (ví dụ đọc
-`output/<người>/_manifest.json` để tìm `max(sequence)` hiện có cho mỗi loại,
-rồi nối tiếp) — **nhưng phải cân nhắc kỹ**: nếu tài liệu mới có ngày SỚM HƠN các
-tài liệu đã áp dụng trước đó, đặt đúng thứ tự thời gian nghĩa là phải RENAME các
-file đã ghi trước đó (đổi `.1`→`.2` v.v.) — đây là hành động ảnh hưởng tới ID đã
-commit, ngoài phạm vi nhiệm vụ này và cần chính sách rõ ràng trước khi tự động hoá.
+1. **Đĩa đầy/mất quyền ghi giữa chừng khi rename nhiều file cùng lúc**: đã có
+   rollback 2 pha và test xác nhận (`test_execute_that_bai_khong_lam_mat_file_cu`,
+   `test_rename_that_bai_khong_commit_state`), nhưng chưa thử với **hàng trăm**
+   file đổi tên cùng lúc (repo mẫu chỉ có vài file/loại) — hiệu năng/độ ổn định
+   ở quy mô lớn chưa được đo.
+2. **Không có UI cho `resolve-review`** — người vận hành phải tự gõ đúng
+   `logical_document_id` (một hash 32 ký tự) lấy từ `review-list`. Đủ dùng cho
+   CLI/Agent, nhưng bất tiện nếu thao tác thủ công qua terminal nhiều lần.
 
 ---
 
 ## 0. Đã gỡ khỏi danh sách blocker
 
+- **Global cross-run naming** — xem mục -1. Không còn `BLOCKED_RUNTIME` giả khi
+  thêm tài liệu hợp lệ cùng loại ở lượt sau.
+- **AI đọc xong ≠ nghiệp vụ xong** — `ANALYZED_PENDING_APPLY`/`REVIEW_REQUIRED`
+  giờ tách biệt hẳn `PROCESSED`; một nguồn có review treo không bao giờ tự
+  PROCESSED chỉ vì đã apply. Xem `app/state.py`, `app/review.py`.
+- **Cache phân tích** — nguồn có cache hợp lệ (fingerprint taxonomy+schema
+  khớp) không bị Agent đọc lại kể cả khi apply, chỉ khi thật sự NEW/STALE.
 - **Incremental processing** — hồ sơ được bổ sung liên tục không còn khiến toàn bộ
   PDF (kể cả đã xử lý) bị Agent đọc lại. Xem `RUNBOOK_ANTIGRAVITY.md` mục
   "Incremental processing" và `app/state.py`/`app/incremental.py`.

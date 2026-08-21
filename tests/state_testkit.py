@@ -45,8 +45,10 @@ def make_analysis(
     document_date: str | None = None,
     needs_review: bool = False,
     review_reason: str | None = None,
+    title: str | None = None,
 ) -> Path:
     stem = Path(pdf_name).stem
+    title = title or "Tài liệu tổng hợp"
     out = analysis_root / person / f"{stem}.json"
     out.parent.mkdir(parents=True, exist_ok=True)
     date_conf = 0.9 if document_date else 0.0
@@ -79,7 +81,7 @@ def make_analysis(
                 "confidence": confidence,
                 "document_date": document_date,
                 "date_confidence": date_conf,
-                "title_short": "Tài liệu tổng hợp",
+                "title_short": title,
                 "needs_review": needs_review,
                 "review_reason": review_reason,
             }
@@ -102,6 +104,7 @@ def add_source(
     document_date: str | None = None,
     needs_review: bool = False,
     review_reason: str | None = None,
+    title: str | None = None,
 ) -> Path:
     """Tạo một PDF tổng hợp + analysis JSON khớp nhau.
 
@@ -115,6 +118,6 @@ def add_source(
     make_analysis(
         analysis_root, person, filename, page_count=n_pages, type_id=type_id,
         confidence=confidence, document_date=document_date, needs_review=needs_review,
-        review_reason=review_reason,
+        review_reason=review_reason, title=title,
     )
     return pdf_path

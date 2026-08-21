@@ -3,6 +3,8 @@
     python -m app.cli process "input/<TEN_NGUOI>"            # mặc định dry-run, incremental
     python -m app.cli process "input/<TEN_NGUOI>" --apply
     python -m app.cli status "input/<TEN_NGUOI>"
+    python -m app.cli review-list "input/<TEN_NGUOI>"
+    python -m app.cli resolve-review <logical_document_id> --type-id 86 --date 2013-09-10
     python -m app.cli inventory "input/<TEN_NGUOI>"
     python -m app.cli import-state "input/<TEN_NGUOI>"
     python -m app.cli state-export
@@ -21,11 +23,14 @@ from pathlib import Path
 from typing import Optional
 
 from .catalog import load_catalog
+from .fingerprint import current_fingerprint
 from .golden import run_all_golden
 from .incremental import scan_person_folder
 from .models import MODE_APPLY, MODE_DRY_RUN, PipelineError
 from .pdf_inventory import build_inventory
 from .pipeline import PipelineResult, Workspace, process_person_folder
+from .reconcile import reconcile
+from .review import list_pending_reviews, resolve_review
 from .state import StateRegistry
 from .state_import import import_person_folder
 from .vision_adapter import available_providers
@@ -61,7 +66,7 @@ def print_summary(result: PipelineResult) -> None:
     inv = result.inventory
     print(f"Hồ sơ            : {result.person_folder}")
     print(f"Chế độ           : {result.mode}")
-    print(f"Provider         : {json.dumps(result.manifest['provider'], ensure_ascii=False)}")
+    print(f"Provider         : {json.dumps(result.manifest.get('provider'), ensure_ascii=False)}")
     print(f"File nguồn       : {len(inv.sources)}")
     for s in inv.sources:
         print(f"    - {s.name}  ({s.pages} trang, sha256 {s.sha256[:12]}…)")
@@ -70,56 +75,52 @@ def print_summary(result: PipelineResult) -> None:
     if result.incremental is not None:
         c = result.incremental.counts()
         print("\n--- Incremental ---")
-        print(f"  Mới bổ sung (NEW)      : {c['NEW']}")
-        print(f"  Đã xử lý trước (SKIP)  : {c['ALREADY_PROCESSED']}")
-        print(f"  Đang chờ review        : {c['REVIEW_PENDING']}")
-        print(f"  Lỗi cũ                 : {c['FAILED_PREVIOUSLY']}")
-        print(f"  Bị gián đoạn           : {c['INTERRUPTED']}")
-        print(f"  Trùng nội dung         : {c['DUPLICATE_SOURCE']}")
+        print(f"  Mới bổ sung (NEW)          : {c['NEW']}")
+        print(f"  Cache hết hạn (STALE)      : {c['STALE_ANALYSIS']}")
+        print(f"  Đã phân tích, chờ apply    : {c['CACHED_PENDING_APPLY']}")
+        print(f"  Đang chờ review            : {c['CACHED_REVIEW_REQUIRED']}")
+        print(f"  Đã hoàn tất trước (SKIP)   : {c['ALREADY_PROCESSED']}")
+        print(f"  Lỗi cũ                     : {c['FAILED_PREVIOUSLY']}")
+        print(f"  Bị gián đoạn               : {c['INTERRUPTED']}")
+        print(f"  Trùng nội dung             : {c['DUPLICATE_SOURCE']}")
         for d in result.incremental.decisions:
             if d.output_mismatch:
                 print(f"  CẢNH BÁO STATE_OUTPUT_MISMATCH: {d.source.name}: {d.output_mismatch_detail}")
 
-    print(f"\nLogical document (lượt này) : {len(result.documents)}")
-    auto = [d for d in result.documents if d.final_status == "AUTO"]
-    review = [d for d in result.documents if d.final_status == "REVIEW"]
-    print(f"AUTO             : {len(auto)}")
-    print(f"REVIEW           : {len(review)}")
+    summary = result.manifest.get("summary")
+    if summary:
+        print(f"\nLogical document (toàn hồ sơ) : {summary.get('logical_documents')}")
+        print(f"  AUTO_RESOLVED   : {summary.get('auto_resolved')}")
+        print(f"  REVIEW_RESOLVED : {summary.get('review_resolved')}")
+        print(f"  REVIEW_PENDING  : {summary.get('review_pending')}")
 
-    if auto:
-        print("\n--- AUTO (sẽ ghi vào output/) ---")
-        for d in sorted(auto, key=lambda x: (x.classification.type_id, x.target_file or "")):
+    docs = result.manifest.get("documents") or []
+    settled = [d for d in docs if d.get("current_target_filename")]
+    pending = [d for d in docs if d.get("needs_review")]
+    if settled:
+        print("\n--- Đã có tên chính thức (output/) ---")
+        for d in sorted(settled, key=lambda x: (x["type_id"], x.get("sequence_index") or 0)):
             print(
-                f"  {d.document.source_file} trang {d.document.source_pages} "
-                f"-> [{d.classification.type_id}] {d.target_file}"
-                f"  (conf {d.classification.confidence:.2f}"
-                f"{', ngày ' + d.classification.document_date if d.classification.document_date else ''})"
+                f"  {d['source_file']} trang {d['source_pages']} -> "
+                f"[{d['type_id']}] {d['current_target_filename']} "
+                f"({d.get('resolution_status')}{', ngày ' + d['document_date'] if d.get('document_date') else ''})"
             )
-    if review:
-        print("\n--- REVIEW (cần người quyết định) ---")
-        for d in sorted(review, key=lambda x: (x.document.source_file, x.document.source_pages[0])):
-            reasons = sorted(set(d.classification_reasons) | set(d.final_reasons))
+    if pending:
+        print("\n--- REVIEW_PENDING (cần người quyết định - xem `review-list`) ---")
+        for d in sorted(pending, key=lambda x: (x["source_file"], x["source_pages"][0])):
             print(
-                f"  {d.document.source_file} trang {d.document.source_pages} "
-                f"-> [{d.classification.type_id}] {d.classification.title_short or ''}"
-                f"  (conf {d.classification.confidence:.2f}) lý do: {', '.join(reasons)}"
+                f"  [{d['logical_document_id'][:12]}] {d['source_file']} trang {d['source_pages']} "
+                f"-> ứng viên [{d['type_id']}] {d.get('title_short') or ''}  lý do: {d.get('review_reason')}"
             )
+
+    for f in result.manifest.get("failed_this_run") or []:
+        print(f"\nLỖI (FAILED): {f['source_file']}: {f['error']}")
 
     print("\n--- QC ---")
     if not result.qc.checks:
         print("  (không có gì mới cần kiểm - không có nguồn nào được xử lý lượt này)")
     for c in result.qc.checks:
         print(f"  [{'PASS' if c.passed else 'FAIL'}] {c.name}: {c.detail}")
-
-    if result.write_result is not None:
-        w = result.write_result
-        print("\n--- Ghi file ---")
-        print(f"  đã ghi mới       : {len(w.written)}")
-        print(f"  bỏ qua (đã đúng) : {len(w.skipped_identical)}")
-        for c in w.conflicts:
-            print(f"  XUNG ĐỘT: {c}")
-        for s in w.stale_in_output:
-            print(f"  file lạ còn sót (không đụng tới): {s}")
 
     for n in result.notes:
         print(f"\nGhi chú: {n}")
@@ -165,18 +166,22 @@ def cmd_status(args: argparse.Namespace) -> int:
     inv = build_inventory(Path(args.folder))
     output_dir = ws.output / inv.person_folder
     review_dir = ws.review / inv.person_folder
+    catalog = load_catalog()
     with StateRegistry(ws.state_db_path) as registry:
         scan = scan_person_folder(
-            inv, registry, mode=MODE_DRY_RUN, output_dir=output_dir, review_dir=review_dir
+            inv, registry, mode=MODE_DRY_RUN, fingerprint=current_fingerprint(catalog),
+            output_dir=output_dir, review_dir=review_dir,
         )
     if args.json:
         print(json.dumps(scan.as_dict(), ensure_ascii=False, indent=2))
     else:
-        print(f"TOTAL: {len(scan.decisions)}")
         c = scan.counts()
+        print(f"TOTAL: {len(scan.decisions)}")
         print(f"NEW: {c['NEW']}")
+        print(f"STALE_ANALYSIS: {c['STALE_ANALYSIS']}")
+        print(f"ANALYZED_PENDING_APPLY: {c['CACHED_PENDING_APPLY']}")
+        print(f"REVIEW_REQUIRED: {c['CACHED_REVIEW_REQUIRED']}")
         print(f"PROCESSED: {c['ALREADY_PROCESSED']}")
-        print(f"REVIEW_REQUIRED: {c['REVIEW_PENDING']}")
         print(f"FAILED: {c['FAILED_PREVIOUSLY']}")
         if c["INTERRUPTED"]:
             print(f"INTERRUPTED: {c['INTERRUPTED']}")
@@ -186,6 +191,54 @@ def cmd_status(args: argparse.Namespace) -> int:
             if d.output_mismatch:
                 print(f"STATE_OUTPUT_MISMATCH: {d.source.name}: {d.output_mismatch_detail}")
     return EXIT_OK
+
+
+def cmd_review_list(args: argparse.Namespace) -> int:
+    ws = _workspace(args)
+    person = Path(args.folder).name
+    with StateRegistry(ws.state_db_path) as registry:
+        items = list_pending_reviews(registry, person)
+    if args.json:
+        print(json.dumps([i.__dict__ for i in items], ensure_ascii=False, indent=2))
+        return EXIT_OK
+    if not items:
+        print(f"Không có logical document nào đang REVIEW_PENDING cho '{person}'.")
+        return EXIT_OK
+    for i in items:
+        print(f"[{i.logical_document_id}]")
+        print(f"  Nguồn        : {i.source_filename} trang {i.source_pages}")
+        print(f"  Ứng viên     : {i.type_id} (conf {i.confidence:.2f})")
+        print(f"  Ngày (nếu có): {i.document_date}")
+        print(f"  Tiêu đề      : {i.title_short}")
+        print(f"  Lý do REVIEW : {', '.join(i.classification_reasons)}")
+        print()
+    print(
+        "Chốt bằng: python -m app.cli resolve-review <logical_document_id> "
+        "--type-id <mã trong danh mục> [--date yyyy-mm-dd]"
+    )
+    return EXIT_OK
+
+
+def cmd_resolve_review(args: argparse.Namespace) -> int:
+    ws = _workspace(args)
+    catalog = load_catalog()
+    with StateRegistry(ws.state_db_path) as registry:
+        row = resolve_review(
+            registry, catalog, args.logical_document_id,
+            type_id=args.type_id, document_date=args.date, resolved_by=args.by,
+        )
+    print(f"Đã chốt {row.logical_document_id}: type_id={row.effective_type_id} ngày={row.effective_document_date}")
+    print("Chạy `process ... --apply` để ghi file thật với tên chính thức.")
+    return EXIT_OK
+
+
+def cmd_reconcile(args: argparse.Namespace) -> int:
+    ws = _workspace(args)
+    person = Path(args.folder).name
+    with StateRegistry(ws.state_db_path) as registry:
+        report = reconcile(registry, person, ws.output / person, ws.review / person)
+    print(report.summary_text())
+    return EXIT_OK if report.ok else EXIT_BLOCKED
 
 
 def cmd_import_state(args: argparse.Namespace) -> int:
@@ -266,11 +319,11 @@ def build_parser() -> argparse.ArgumentParser:
     g = sp.add_mutually_exclusive_group()
     g.add_argument("--dry-run", action="store_true", default=True, help="Mặc định")
     g.add_argument("--apply", action="store_true", help="Thực sự ghi output/review")
-    sp.add_argument("--force", action="store_true", help="Ghi đè khi file đích khác nội dung")
+    sp.add_argument("--force", action="store_true", help="(dự phòng - đường đi incremental tự fail-safe)")
     sp.add_argument("--json", action="store_true", help="In manifest JSON thay vì summary")
     sp.add_argument(
         "--retry-review", action="store_true",
-        help="Xử lý lại các nguồn đang REVIEW_REQUIRED thay vì SKIP mặc định",
+        help="Đọc lại (Vision) các nguồn đang REVIEW_REQUIRED thay vì dùng cache",
     )
     sp.add_argument(
         "--retry-failed", action="store_true",
@@ -283,10 +336,26 @@ def build_parser() -> argparse.ArgumentParser:
     add_provider_args(sp, default_provider="agent")
     sp.set_defaults(func=cmd_process)
 
-    sp = sub.add_parser("status", help="Xem trạng thái NEW/PROCESSED/REVIEW/FAILED (chỉ đọc)")
+    sp = sub.add_parser("status", help="Xem trạng thái NEW/ANALYZED/REVIEW/PROCESSED/FAILED (chỉ đọc)")
     sp.add_argument("folder")
     sp.add_argument("--json", action="store_true")
     sp.set_defaults(func=cmd_status)
+
+    sp = sub.add_parser("review-list", help="Liệt kê logical document đang REVIEW_PENDING của một hồ sơ")
+    sp.add_argument("folder")
+    sp.add_argument("--json", action="store_true")
+    sp.set_defaults(func=cmd_review_list)
+
+    sp = sub.add_parser("resolve-review", help="Chốt một logical document REVIEW_PENDING (không đọc lại PDF)")
+    sp.add_argument("logical_document_id")
+    sp.add_argument("--type-id", required=True, dest="type_id", help="type_id đúng trong document_types.json")
+    sp.add_argument("--date", default=None, help="document_date yyyy-mm-dd (bỏ trống nếu không xác định được)")
+    sp.add_argument("--by", default="operator", help="Người chốt (ghi vào resolved_by)")
+    sp.set_defaults(func=cmd_resolve_review)
+
+    sp = sub.add_parser("reconcile", help="Đối chiếu state DB với file thật trên đĩa (chỉ báo cáo)")
+    sp.add_argument("folder")
+    sp.set_defaults(func=cmd_reconcile)
 
     sp = sub.add_parser("inventory", help="Chỉ liệt kê file nguồn + SHA-256")
     sp.add_argument("folder")
