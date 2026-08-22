@@ -475,6 +475,7 @@ def _incremental_manifest(
     ]
     docs.sort(key=document_entry_sort_key)
     sources_list.sort(key=source_entry_sort_key)
+    canonical_summary = state_registry.summarize_person(inventory.person_folder)
     return {
         "schema_version": "2.0-incremental",
         "mode": mode,
@@ -485,10 +486,10 @@ def _incremental_manifest(
         "sources": sources_list,
         "documents": docs,
         "summary": {
-            "logical_documents": len(docs),
-            "auto_resolved": sum(1 for d in docs if d["resolution_status"] == "AUTO_RESOLVED"),
-            "review_resolved": sum(1 for d in docs if d["resolution_status"] == "REVIEW_RESOLVED"),
-            "review_pending": sum(1 for d in docs if d["resolution_status"] == "REVIEW_PENDING"),
+            # Các count báo cáo lấy từ canonical effective state.  Không dùng
+            # classification_kind thô trước resolve, và không dùng số artifact
+            # review lịch sử làm REVIEW_PENDING hiện tại.
+            **canonical_summary,
         },
         "qc": qc.as_dict(),
         "failed_this_run": _failed_report(scan, failed),

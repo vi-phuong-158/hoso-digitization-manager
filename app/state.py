@@ -174,6 +174,18 @@ class LogicalDocumentRow:
         return d
 
 
+@dataclass(frozen=True)
+class LegacyHydrationResult:
+    """Kết quả một lần khôi phục logical state từ ledger legacy.
+
+    Chỉ các ID trong ``restored_logical_document_ids`` mới vừa được INSERT.
+    Một lượt hoàn toàn đã hydrate trả về danh sách rỗng và không ghi lại DB.
+    """
+
+    restored_logical_document_ids: tuple[str, ...]
+    source_status: str
+
+
 def _row_to_logical_document(row: sqlite3.Row) -> LogicalDocumentRow:
     d = dict(row)
     d["source_pages"] = json.loads(d["source_pages"])
@@ -526,6 +538,291 @@ class StateRegistry:
         q += " ORDER BY ld.logical_document_id"
         rows = self._conn.execute(q, params).fetchall()
         return [_row_to_logical_document(r) for r in rows]
+
+    def summarize_person(self, person_folder: str) -> dict[str, int]:
+        """Tóm tắt canonical state theo *effective* resolution.
+
+        Báo cáo vận hành phải đếm ``resolved_classification_kind`` khi có,
+        thay vì đếm nhãn phân loại thô trước khi operator resolve.  Cột review
+        cũng chỉ đếm ``REVIEW_PENDING`` hiện tại; artifact review đã resolved
+        (nếu còn được giữ để audit) được tách riêng.
+        """
+        rows = self.logical_documents_for_person(person_folder)
+        taxonomy = supporting = duplicate = 0
+        review_pending = review_resolved = auto_resolved = 0
+        historical_review_artifacts = 0
+        for row in rows:
+            kind = row.effective_classification_kind
+            if kind == CLASSIFICATION_KIND_TAXONOMY:
+                taxonomy += 1
+            elif kind == "SUPPORTING_DOCUMENT":
+                supporting += 1
+            elif kind == CLASSIFICATION_KIND_DUPLICATE:
+                duplicate += 1
+            else:  # pragma: no cover - validate_classification_metadata chặn từ lúc ghi
+                raise PipelineError(f"classification_kind không hợp lệ trong state: {kind!r}")
+
+            if row.resolution_status == RESOLUTION_REVIEW_PENDING:
+                review_pending += 1
+            elif row.resolution_status == RESOLUTION_REVIEW_RESOLVED:
+                review_resolved += 1
+                if row.target_dir == "review" and row.current_target_filename:
+                    historical_review_artifacts += 1
+            elif row.resolution_status == RESOLUTION_AUTO_RESOLVED:
+                auto_resolved += 1
+            else:  # pragma: no cover - DB CHECK bảo vệ giá trị này
+                raise PipelineError(f"resolution_status không hợp lệ trong state: {row.resolution_status!r}")
+
+        return {
+            "logical_documents": len(rows),
+            "taxonomy": taxonomy,
+            "supporting": supporting,
+            "duplicate": duplicate,
+            "auto_resolved": auto_resolved,
+            "review_resolved": review_resolved,
+            "review_pending": review_pending,
+            "historical_review_artifacts": historical_review_artifacts,
+        }
+
+    def hydrate_legacy_logical_documents(
+        self,
+        source_hash: str,
+        *,
+        source_filename: str,
+        source_relative_path: str,
+        person_folder: str,
+        page_count: int,
+        documents: list[dict],
+        manifest_path: str,
+        taxonomy_version: str,
+        analysis_schema_version: str,
+    ) -> LegacyHydrationResult:
+        """Khôi phục metadata logical-document từ evidence legacy đã preflight.
+
+        Hàm này không đọc PDF, không tạo artifact và không tự resolve REVIEW.
+        Caller phải chứng minh identity/artifact trước khi gọi.  Dù vậy, hàm
+        vẫn validate đầy đủ metadata và kiểm tra row đã có để một recovery
+        partial không thể vô tình ghi đè state khác.  Mọi thay đổi được commit
+        cùng một transaction.
+        """
+        source = self.get(source_hash)
+        if source is not None:
+            if source.person_folder != person_folder:
+                raise PipelineError("Legacy recovery từ chối source hash thuộc person_folder khác.")
+            if source.page_count != page_count:
+                raise PipelineError("Legacy recovery từ chối source có page_count canonical khác inventory.")
+        if not documents:
+            raise PipelineError("Legacy recovery từ chối source không có logical document.")
+
+        desired: dict[str, dict] = {}
+        owned_pages: set[int] = set()
+        for raw in documents:
+            pages = raw.get("source_pages")
+            if not isinstance(pages, list) or not pages or not all(
+                isinstance(p, int) and not isinstance(p, bool) for p in pages
+            ):
+                raise PipelineError("Legacy logical document có source_pages không hợp lệ.")
+            if pages != sorted(pages) or len(set(pages)) != len(pages):
+                raise PipelineError("Legacy logical document có source_pages không theo thứ tự hoặc bị lặp.")
+            if any(p < 1 or p > page_count for p in pages):
+                raise PipelineError("Legacy logical document có trang ngoài phạm vi source.")
+            if owned_pages.intersection(pages):
+                raise PipelineError("Legacy logical documents bị overlap trang.")
+            owned_pages.update(pages)
+
+            expected_id = logical_document_id(source_hash, pages)
+            supplied_id = raw.get("logical_document_id")
+            if supplied_id is not None and supplied_id != expected_id:
+                raise PipelineError(
+                    f"LEGACY_LOGICAL_IDENTITY_AMBIGUOUS: {supplied_id!r} không khớp ID deterministic {expected_id!r}."
+                )
+
+            classification_status = raw.get("classification_status")
+            if classification_status not in ("AUTO", "REVIEW"):
+                raise PipelineError("Legacy logical document thiếu classification_status AUTO/REVIEW.")
+            resolution_status = raw.get("resolution_status")
+            if resolution_status not in (
+                RESOLUTION_AUTO_RESOLVED,
+                RESOLUTION_REVIEW_PENDING,
+                RESOLUTION_REVIEW_RESOLVED,
+            ):
+                raise PipelineError("Legacy logical document có resolution_status không hợp lệ.")
+
+            kind = raw.get("classification_kind") or CLASSIFICATION_KIND_TAXONOMY
+            document_date, date_precision = validate_classification_metadata(
+                classification_kind=kind,
+                type_id=raw.get("type_id"),
+                subtype=raw.get("subtype"),
+                document_date=raw.get("document_date"),
+                date_precision=raw.get("date_precision"),
+                duplicate_of=raw.get("duplicate_of"),
+            )
+            resolved_kind = raw.get("resolved_classification_kind")
+            resolved_type_id = raw.get("resolved_type_id")
+            resolved_subtype = raw.get("resolved_subtype")
+            resolved_date = raw.get("resolved_document_date")
+            resolved_precision = raw.get("resolved_date_precision")
+            if resolution_status == RESOLUTION_REVIEW_RESOLVED:
+                resolved_date, resolved_precision = validate_classification_metadata(
+                    classification_kind=resolved_kind or CLASSIFICATION_KIND_TAXONOMY,
+                    type_id=resolved_type_id,
+                    subtype=resolved_subtype,
+                    document_date=resolved_date,
+                    date_precision=resolved_precision,
+                    duplicate_of=raw.get("duplicate_of"),
+                )
+            elif any(v is not None for v in (resolved_kind, resolved_type_id, resolved_subtype, resolved_date, resolved_precision)):
+                raise PipelineError("Legacy logical document chưa resolved nhưng lại chứa resolved metadata.")
+
+            target_dir = raw.get("target_dir")
+            target_file = raw.get("current_target_filename")
+            if target_dir not in ("output", "review") or not isinstance(target_file, str) or not target_file:
+                raise PipelineError("Legacy logical document thiếu target artifact hợp lệ.")
+
+            desired[expected_id] = {
+                "logical_document_id": expected_id,
+                "source_pages": pages,
+                "type_id": raw.get("type_id") or "UNKNOWN",
+                "confidence": float(raw.get("confidence") or 0.0),
+                "document_date": document_date,
+                "date_confidence": float(raw.get("date_confidence") or 0.0),
+                "title_short": raw.get("title_short") or None,
+                "segmentation_flags": list(raw.get("segmentation_flags") or []),
+                "classification_status": classification_status,
+                "classification_reasons": list(raw.get("classification_reasons") or []),
+                "resolution_status": resolution_status,
+                "resolved_type_id": resolved_type_id,
+                "resolved_document_date": resolved_date,
+                "resolved_by": raw.get("resolved_by"),
+                "resolved_at": raw.get("resolved_at"),
+                "current_target_filename": target_file,
+                "target_dir": target_dir,
+                "sequence_index": raw.get("sequence_index"),
+                "classification_kind": kind,
+                "subtype": raw.get("subtype"),
+                "date_precision": date_precision,
+                "duplicate_of": raw.get("duplicate_of"),
+                "resolved_classification_kind": resolved_kind,
+                "resolved_subtype": resolved_subtype,
+                "resolved_date_precision": resolved_precision,
+            }
+
+        if owned_pages != set(range(1, page_count + 1)):
+            raise PipelineError("Legacy logical documents không cover đúng toàn bộ trang nguồn.")
+
+        existing = {row.logical_document_id: row for row in self.logical_documents_for(source_hash)}
+        unexpected = sorted(set(existing) - set(desired))
+        if unexpected:
+            raise PipelineError(
+                "Legacy recovery từ chối source đã có logical identity ngoài ledger: " + ", ".join(unexpected)
+            )
+        comparable = (
+            "source_pages", "type_id", "document_date", "classification_status",
+            "classification_reasons", "resolution_status", "current_target_filename",
+            "target_dir", "sequence_index", "classification_kind", "subtype",
+            "date_precision", "duplicate_of", "resolved_classification_kind",
+            "resolved_type_id", "resolved_subtype", "resolved_document_date",
+            "resolved_date_precision",
+        )
+        for lid, row in existing.items():
+            now = row.as_dict()
+            mismatch = []
+            for field in comparable:
+                expected = desired[lid][field]
+                # as_dict export biểu diễn NULL bằng UNKNOWN để external state
+                # không mơ hồ; DB vẫn phải giữ NULL cho metadata unresolved để
+                # không che date_precision phân loại gốc.
+                if field == "resolved_date_precision" and expected is None:
+                    expected = DATE_PRECISION_UNKNOWN
+                if now[field] != expected:
+                    mismatch.append(field)
+            if mismatch:
+                raise PipelineError(
+                    f"Legacy recovery conflict tại {lid}: state hiện có khác ledger ở {', '.join(mismatch)}."
+                )
+
+        restored = tuple(sorted(set(desired) - set(existing)))
+        target_status = (
+            STATUS_REVIEW_REQUIRED
+            if any(d["resolution_status"] == RESOLUTION_REVIEW_PENDING for d in desired.values())
+            else STATUS_PROCESSED
+        )
+        source_needs_update = (
+            source is None
+            or source.status != target_status
+            or source.logical_document_count != len(desired)
+            or source.manifest_path != manifest_path
+            or source.taxonomy_version != taxonomy_version
+            or source.analysis_schema_version != analysis_schema_version
+            or (target_status == STATUS_REVIEW_REQUIRED and source.processed_at is not None)
+        )
+        if not restored and not source_needs_update:
+            return LegacyHydrationResult(restored, target_status)
+
+        ts = _now()
+        with self._conn:
+            if source is None:
+                self._conn.execute(
+                    """
+                    INSERT INTO sources (
+                        source_hash, source_filename, source_relative_path, person_folder,
+                        page_count, status, first_seen_at, processing_started_at, processed_at,
+                        logical_document_count, manifest_path, last_error, pipeline_version,
+                        taxonomy_version, analysis_schema_version, last_seen_path, updated_at
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, NULL, ?, ?, ?, NULL, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        source_hash, source_filename, source_relative_path, person_folder,
+                        page_count, target_status, ts,
+                        ts if target_status == STATUS_PROCESSED else None,
+                        len(desired), manifest_path, PIPELINE_VERSION, taxonomy_version,
+                        analysis_schema_version, source_relative_path, ts,
+                    ),
+                )
+            for lid in restored:
+                d = desired[lid]
+                self._conn.execute(
+                    """
+                    INSERT INTO logical_documents (
+                        logical_document_id, source_hash, source_pages, type_id, confidence,
+                        document_date, date_confidence, title_short, segmentation_flags,
+                        classification_status, classification_reasons, resolution_status,
+                        resolved_type_id, resolved_document_date, resolved_by, resolved_at,
+                        current_target_filename, target_dir, sequence_index, created_at, updated_at,
+                        classification_kind, subtype, date_precision, duplicate_of,
+                        resolved_classification_kind, resolved_subtype, resolved_date_precision
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        lid, source_hash, json.dumps(d["source_pages"]), d["type_id"], d["confidence"],
+                        d["document_date"], d["date_confidence"], d["title_short"],
+                        json.dumps(d["segmentation_flags"]), d["classification_status"],
+                        json.dumps(d["classification_reasons"]), d["resolution_status"],
+                        d["resolved_type_id"], d["resolved_document_date"], d["resolved_by"],
+                        d["resolved_at"], d["current_target_filename"], d["target_dir"],
+                        d["sequence_index"], ts, ts, d["classification_kind"], d["subtype"],
+                        d["date_precision"], d["duplicate_of"], d["resolved_classification_kind"],
+                        d["resolved_subtype"], d["resolved_date_precision"],
+                    ),
+                )
+            if source_needs_update:
+                if source is not None:
+                    self._conn.execute(
+                        """
+                        UPDATE sources SET
+                            status = ?, processed_at = ?, logical_document_count = ?, manifest_path = ?,
+                            last_error = NULL, pipeline_version = ?, taxonomy_version = ?,
+                            analysis_schema_version = ?, last_seen_path = ?, updated_at = ?
+                        WHERE source_hash = ?
+                        """,
+                        (
+                            target_status,
+                            source.processed_at if target_status == STATUS_PROCESSED else None,
+                            len(desired), manifest_path, PIPELINE_VERSION, taxonomy_version,
+                            analysis_schema_version, source_relative_path, ts, source_hash,
+                        ),
+                    )
+        return LegacyHydrationResult(restored, target_status)
 
     def set_target(
         self, logical_document_id_: str, *, target_filename: str, target_dir: str, sequence_index: Optional[int]

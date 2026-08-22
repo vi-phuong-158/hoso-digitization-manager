@@ -11,6 +11,8 @@
     python -m app.cli resolve-review <logical_document_id> --date 2023-11 --date-precision MONTH
     python -m app.cli inventory "input/<TEN_NGUOI>"
     python -m app.cli import-state "input/<TEN_NGUOI>"
+    python -m app.cli recover-legacy-state "input/<TEN_NGUOI>"
+    python -m app.cli state-summary "input/<TEN_NGUOI>"
     python -m app.cli state-export
     python -m app.cli test-golden
     python -m app.cli providers
@@ -36,7 +38,7 @@ from .pipeline import PipelineResult, Workspace, process_person_folder
 from .reconcile import reconcile
 from .review import list_pending_reviews, resolve_review
 from .state import StateRegistry
-from .state_import import import_person_folder
+from .state_import import import_person_folder, recover_legacy_person_folder
 from .vision_adapter import available_providers
 
 EXIT_OK = 0
@@ -261,6 +263,37 @@ def cmd_import_state(args: argparse.Namespace) -> int:
     return EXIT_OK
 
 
+def cmd_recover_legacy_state(args: argparse.Namespace) -> int:
+    """Recovery tường minh, không gọi provider và không tạo/sửa PDF."""
+    ws = _workspace(args)
+    with StateRegistry(ws.state_db_path) as registry:
+        report = recover_legacy_person_folder(Path(args.folder), registry, workspace=ws)
+    if args.json:
+        print(json.dumps({"person_folder": report.person_folder, "outcomes": [o.__dict__ for o in report.outcomes]}, ensure_ascii=False, indent=2))
+    else:
+        print(report.summary_text())
+    blocked = any(o.outcome == "STATE_IMPORT_REVIEW_REQUIRED" for o in report.outcomes)
+    return EXIT_BLOCKED if blocked else EXIT_OK
+
+
+def cmd_state_summary(args: argparse.Namespace) -> int:
+    """Tóm tắt canonical effective state cho báo cáo batch/operator."""
+    ws = _workspace(args)
+    person = Path(args.folder).name
+    with StateRegistry(ws.state_db_path) as registry:
+        summary = registry.summarize_person(person)
+    if args.json:
+        print(json.dumps({"person_folder": person, **summary}, ensure_ascii=False, indent=2))
+    else:
+        print(f"STATE SUMMARY: {person}")
+        for key in (
+            "logical_documents", "taxonomy", "supporting", "duplicate",
+            "auto_resolved", "review_resolved", "review_pending", "historical_review_artifacts",
+        ):
+            print(f"  {key}: {summary[key]}")
+    return EXIT_OK
+
+
 def cmd_state_export(args: argparse.Namespace) -> int:
     ws = _workspace(args)
     with StateRegistry(ws.state_db_path) as registry:
@@ -399,6 +432,22 @@ def build_parser() -> argparse.ArgumentParser:
     )
     sp.add_argument("folder")
     sp.set_defaults(func=cmd_import_state)
+
+    sp = sub.add_parser(
+        "recover-legacy-state",
+        help="Hydrate logical_documents từ legacy ledger/artifact đã có (không gọi provider)",
+    )
+    sp.add_argument("folder")
+    sp.add_argument("--json", action="store_true")
+    sp.set_defaults(func=cmd_recover_legacy_state)
+
+    sp = sub.add_parser(
+        "state-summary",
+        help="Đếm effective classification + REVIEW_PENDING từ canonical state",
+    )
+    sp.add_argument("folder")
+    sp.add_argument("--json", action="store_true")
+    sp.set_defaults(func=cmd_state_summary)
 
     sp = sub.add_parser("state-export", help="Xuất toàn bộ state registry ra JSON (backup/kiểm tra)")
     sp.add_argument("--out", default=None, help="Ghi ra file thay vì in stdout")
