@@ -25,6 +25,7 @@ from pathlib import Path
 from typing import Optional
 
 from .catalog import find_catalog_path
+from .golden_fixtures import isolated_golden_workspace
 from .models import PipelineError
 from .pipeline import MODE_DRY_RUN, PipelineResult, Workspace, process_person_folder
 
@@ -218,3 +219,26 @@ def run_all_golden(
         )
         for f in files
     ]
+
+
+def run_all_golden_isolated(
+    repo_root: Optional[Path] = None,
+    *,
+    provider_name: str = "fixture",
+    provider_config: Optional[dict] = None,
+    temp_parent: Optional[Path] = None,
+) -> list[GoldenReport]:
+    """Run Golden in a temporary synthetic workspace, never against ``input/``.
+
+    Provider fixture roots are forced to the staged immutable fixtures.  This
+    prevents an accidental CLI override from falling back to production
+    ``analysis/`` or another runtime folder.
+    """
+    repo_root = Path(repo_root) if repo_root else find_catalog_path().parent
+    with isolated_golden_workspace(repo_root, temp_parent=temp_parent) as staged:
+        config = dict(provider_config or {})
+        if provider_name == "agent":
+            config["analysis_root"] = str(staged.analysis_root)
+        elif provider_name == "fixture":
+            config["fixture_root"] = str(staged.fixture_root)
+        return run_all_golden(staged.root, provider_name=provider_name, provider_config=config)

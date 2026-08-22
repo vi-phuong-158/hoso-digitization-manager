@@ -126,6 +126,12 @@ python -m pytest tests -q
 python -m app.cli test-golden --provider agent
 ```
 
+`test-golden` luôn dựng một workspace tạm với PDF trắng synthetic (đúng tên và
+số trang trong contract), page-signal fixture và agent-analysis fixture đã
+được kiểm soát. Lệnh không đọc/ghi `input/`, `analysis/`, `output/`, `review/`
+hay `state/` production; fixture sẽ bị dọn sau khi chạy. Vì vậy Golden không
+phụ thuộc vào byte PDF hồ sơ cá nhân.
+
 ```bash
 python -m app.cli process "input/Nguyễn Hữu Hải"
 ```

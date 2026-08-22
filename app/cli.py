@@ -28,7 +28,7 @@ from typing import Optional
 
 from .catalog import load_catalog
 from .fingerprint import current_fingerprint
-from .golden import run_all_golden
+from .golden import run_all_golden_isolated
 from .incremental import scan_person_folder
 from .models import MODE_APPLY, MODE_DRY_RUN, PipelineError
 from .pdf_inventory import build_inventory
@@ -281,7 +281,7 @@ def cmd_inventory(args: argparse.Namespace) -> int:
 
 
 def cmd_test_golden(args: argparse.Namespace) -> int:
-    reports = run_all_golden(
+    reports = run_all_golden_isolated(
         Path(args.root) if args.root else None,
         provider_name=args.provider,
         provider_config=_provider_config(args),
