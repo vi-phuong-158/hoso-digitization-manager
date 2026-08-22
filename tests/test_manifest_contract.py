@@ -1,13 +1,16 @@
 from __future__ import annotations
 
 import json
+import os
 import sqlite3
+import subprocess
+import sys
 from pathlib import Path
 
 import pytest
 
 from app.catalog import load_catalog
-from app.manifest import build_manifest
+from app.manifest import build_manifest, save_manifest
 from app.models import DocumentClassification, LogicalDocument, ClassifiedDocument, PipelineError
 from app.pdf_inventory import PersonInventory, SourceFile
 from app.policy import (
@@ -49,6 +52,72 @@ def _manifest(doc: ClassifiedDocument) -> dict:
         load_catalog(), _inventory(), [doc], QCReport(), mode="dry-run",
         provider={"name": "test"},
     )
+
+
+def _multi_inventory(order: list[str]) -> PersonInventory:
+    sources = {
+        name: SourceFile(Path(name), name, name[0].lower() * 64, 1, 1)
+        for name in ("C.pdf", "a.pdf", "b.pdf")
+    }
+    return PersonInventory("P", Path("input/P"), [sources[name] for name in order])
+
+
+def _multi_doc(source_file: str) -> ClassifiedDocument:
+    logical = LogicalDocument(source_file, [1], 1)
+    classification = DocumentClassification(
+        type_id="87", confidence=0.99, document_date="2023-05-19", title_short=source_file,
+    )
+    return ClassifiedDocument(
+        logical, classification, target_file=f"87.{source_file}", target_dir="output",
+    )
+
+
+def _save_multi_manifest(path: Path, source_order: list[str], document_order: list[str]) -> bytes:
+    manifest = build_manifest(
+        load_catalog(), _multi_inventory(source_order),
+        [_multi_doc(name) for name in document_order], QCReport(),
+        mode="dry-run", provider={"name": "test"},
+    )
+    save_manifest(manifest, path)
+    return path.read_bytes()
+
+
+def test_manifest_canonicalizes_source_and_document_insertion_order(tmp_path: Path):
+    expected = _save_multi_manifest(
+        tmp_path / "manifest-a.json", ["C.pdf", "a.pdf", "b.pdf"], ["b.pdf", "C.pdf", "a.pdf"],
+    )
+    assert expected == _save_multi_manifest(
+        tmp_path / "manifest-b.json", ["b.pdf", "C.pdf", "a.pdf"], ["a.pdf", "b.pdf", "C.pdf"],
+    )
+    assert expected == _save_multi_manifest(
+        tmp_path / "manifest-c.json", ["a.pdf", "b.pdf", "C.pdf"], ["C.pdf", "a.pdf", "b.pdf"],
+    )
+
+
+def test_manifest_cross_process_bytes_are_idempotent(tmp_path: Path):
+    script = """
+import os
+from pathlib import Path
+from app.manifest import save_manifest
+
+names = {"C.pdf", "a.pdf", "b.pdf", "d.pdf"}
+sources = [{"file": name, "sha256": name[0].lower() * 64, "pages": 1} for name in names]
+documents = [
+    {"logical_document_id": f"{name}#1", "source_file": name, "source_pages": [1]}
+    for name in names
+]
+save_manifest({"sources": sources, "documents": documents, "mode": "dry-run"}, Path(os.environ["MANIFEST_OUT"]))
+"""
+    rendered: list[bytes] = []
+    for index, seed in enumerate(("1", "2", "3"), start=1):
+        output = tmp_path / f"cross-process-{index}.json"
+        env = {**os.environ, "MANIFEST_OUT": str(output), "PYTHONHASHSEED": seed}
+        subprocess.run(
+            [sys.executable, "-c", script], cwd=Path.cwd(), env=env, check=True,
+            capture_output=True, text=True,
+        )
+        rendered.append(output.read_bytes())
+    assert rendered[0] == rendered[1] == rendered[2]
 
 
 def test_manifest_taxonomy_87_emits_policy_fields():

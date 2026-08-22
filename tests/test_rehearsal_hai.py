@@ -5,22 +5,16 @@ hay đổi phân tích của Agent, các con số dưới đây sẽ lệch và 
 """
 from __future__ import annotations
 
-from pathlib import Path
-
 import pytest
 
 from app.pipeline import Workspace, process_person_folder
 
 
 @pytest.fixture(scope="module")
-def rehearsal(tmp_path_factory, request):
-    root = Path(request.config.rootdir)
-    folder = root / "input" / "Nguyễn Hữu Hải"
-    if not folder.is_dir():
-        pytest.skip("Không có hồ sơ mẫu")
+def rehearsal(tmp_path_factory, hai_folder):
     ws = Workspace(tmp_path_factory.mktemp("rehearsal"))
     return process_person_folder(
-        folder, provider_name="agent", workspace=ws, write_manifest=False
+        hai_folder, provider_name="agent", workspace=ws, write_manifest=False
     )
 
 

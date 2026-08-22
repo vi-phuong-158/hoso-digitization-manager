@@ -34,7 +34,13 @@ from .global_naming import (
     has_collisions,
 )
 from .incremental import IncrementalScan, scan_person_folder
-from .manifest import build_manifest, load_manifest, save_manifest
+from .manifest import (
+    build_manifest,
+    document_entry_sort_key,
+    load_manifest,
+    save_manifest,
+    source_entry_sort_key,
+)
 from .models import MODE_APPLY, MODE_DRY_RUN, ClassifiedDocument, PipelineError
 from .naming import DEFAULT_NAMING_POLICY, NamingPolicy, assign_names, review_filename
 from .policy import (
@@ -467,6 +473,8 @@ def _incremental_manifest(
         for s in (state_registry.get(h) for h in {r.source_hash for r in state_registry.logical_documents_for_person(inventory.person_folder)})
         if s is not None
     ]
+    docs.sort(key=document_entry_sort_key)
+    sources_list.sort(key=source_entry_sort_key)
     return {
         "schema_version": "2.0-incremental",
         "mode": mode,
