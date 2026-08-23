@@ -56,7 +56,7 @@ from .segmenter import (
     SegmentationConfig,
     segment_source,
 )
-from .state import DB_FILENAME, LogicalDocumentRow, StateRegistry
+from .state import DB_FILENAME, SOURCE_MISSING, LogicalDocumentRow, StateRegistry
 from .vision_adapter import DocumentVisionProvider, get_provider, validate_page_observation
 from .writer import LEDGER_FILENAME, WriteResult, apply_documents, plan_targets, split_pages, verify_outputs
 
@@ -348,6 +348,37 @@ def _process_incremental(
     retry_review: bool,
     retry_failed: bool,
 ) -> PipelineResult:
+    present_hashes = {source.sha256 for source in inventory.sources}
+    missing_sources = [
+        item for item in state_registry.source_lifecycle(inventory.person_folder, present_hashes)
+        if item.lifecycle_status == SOURCE_MISSING
+    ]
+    if missing_sources and mode == MODE_APPLY:
+        # An unresolved historical source is a reportable safety blocker for
+        # APPLY.  Explicit `retire-source` is the only transition that clears
+        # that blocker; dry-run may still inspect current sources.
+        scan = scan_person_folder(
+            inventory, state_registry, mode=MODE_DRY_RUN, fingerprint=current_fingerprint(catalog),
+            retry_review=retry_review, retry_failed=retry_failed,
+            output_dir=output_dir, review_dir=review_dir,
+        )
+        qc = QCReport()
+        notes = [
+            "BLOCKED_MISSING_SOURCE: " + "; ".join(
+                f"{item.source_filename} (sha256 {item.source_hash})" for item in missing_sources
+            )
+        ]
+        manifest = _incremental_manifest(
+            catalog, inventory, provider, scan, qc, mode=mode, failed={}, notes=notes,
+            state_registry=state_registry,
+        )
+        manifest_path = _persist(manifest, ws, inventory.person_folder, mode) if write_manifest else None
+        return PipelineResult(
+            person_folder=inventory.person_folder, mode=mode, inventory=inventory,
+            documents=[], qc=qc, manifest=manifest, manifest_path=manifest_path,
+            notes=notes, incremental=scan, status_override="BLOCKED_MISSING_SOURCE",
+        )
+
     fp = current_fingerprint(catalog)
     scan = scan_person_folder(
         inventory, state_registry, mode=mode, fingerprint=fp,
@@ -470,12 +501,16 @@ def _incremental_manifest(
         )
     sources_list = [
         {"file": s.source_filename, "sha256": s.source_hash, "pages": s.page_count}
-        for s in (state_registry.get(h) for h in {r.source_hash for r in state_registry.logical_documents_for_person(inventory.person_folder)})
-        if s is not None
+        for s in state_registry.all(inventory.person_folder)
     ]
     docs.sort(key=document_entry_sort_key)
     sources_list.sort(key=source_entry_sort_key)
-    canonical_summary = state_registry.summarize_person(inventory.person_folder)
+    canonical_summary = state_registry.summarize_person(
+        inventory.person_folder, {source.sha256 for source in inventory.sources}
+    )
+    source_lifecycle = state_registry.source_lifecycle(
+        inventory.person_folder, {source.sha256 for source in inventory.sources}
+    )
     return {
         "schema_version": "2.0-incremental",
         "mode": mode,
@@ -484,6 +519,7 @@ def _incremental_manifest(
         "incremental": scan.as_dict(),
         "same_date_tie_break": SAME_DATE_TIE_BREAK,
         "sources": sources_list,
+        "source_lifecycle": [item.as_dict() for item in source_lifecycle],
         "documents": docs,
         "summary": {
             # Các count báo cáo lấy từ canonical effective state.  Không dùng
@@ -577,7 +613,9 @@ def _finish_apply(
     unorderable_types: set[str] = set()
     for type_id in sorted(active_types):
         rows = [
-            r for r in state_registry.logical_documents_for_person(person, type_id=type_id)
+            r for r in state_registry.logical_documents_for_person(
+                person, type_id=type_id, include_retired=False
+            )
             if r.is_settled and r.is_nameable and r.effective_classification_kind == CLASSIFICATION_KIND_TAXONOMY
         ]
         nameable = [NameableDoc.from_row(r) for r in rows]
@@ -600,7 +638,9 @@ def _finish_apply(
     #     theo type_id (không có type_id chính thức, không dùng STT 01-104
     #     giả). Luôn xếp được (không cần ngày) - chỉ tie-break xác định.
     if active_supporting_keys:
-        all_person_rows = state_registry.logical_documents_for_person(person)
+        all_person_rows = state_registry.logical_documents_for_person(
+            person, include_retired=False
+        )
         for key in sorted(active_supporting_keys):
             rows = [
                 r for r in all_person_rows

@@ -31,6 +31,7 @@ from .state import (
     STATUS_ANALYZED_PENDING_APPLY,
     STATUS_FAILED,
     STATUS_PROCESSED,
+    STATUS_RETIRED,
     STATUS_PROCESSING,
     STATUS_REVIEW_REQUIRED,
     SourceState,
@@ -45,6 +46,7 @@ DECISION_ALREADY_PROCESSED = "ALREADY_PROCESSED"
 DECISION_FAILED_PREVIOUSLY = "FAILED_PREVIOUSLY"
 DECISION_INTERRUPTED = "INTERRUPTED"
 DECISION_DUPLICATE_SOURCE = "DUPLICATE_SOURCE"
+DECISION_RETIRED_SOURCE = "RETIRED_SOURCE"
 
 ALL_DECISIONS = (
     DECISION_NEW,
@@ -55,6 +57,7 @@ ALL_DECISIONS = (
     DECISION_FAILED_PREVIOUSLY,
     DECISION_INTERRUPTED,
     DECISION_DUPLICATE_SOURCE,
+    DECISION_RETIRED_SOURCE,
 )
 
 # Quyết định coi là "đã có cache phân tích hợp lệ, Agent KHÔNG cần đọc lại".
@@ -139,6 +142,10 @@ class IncrementalScan:
             lines.append(f"Bị gián đoạn lần trước (interrupted): {c[DECISION_INTERRUPTED]}")
         if c[DECISION_DUPLICATE_SOURCE]:
             lines.append(f"Trùng nội dung (duplicate): {c[DECISION_DUPLICATE_SOURCE]}")
+        if c[DECISION_RETIRED_SOURCE]:
+            lines.append(
+                f"Source đã retire, chỉ giữ lịch sử: {c[DECISION_RETIRED_SOURCE]} -> SKIP"
+            )
         mismatches = [d for d in self.decisions if d.output_mismatch]
         if mismatches:
             lines.append("")
@@ -225,6 +232,12 @@ def _decide_canonical(
         return SourceDecision(
             source=f, decision=DECISION_INTERRUPTED, record=record,
             needs_agent=retry, needs_apply=(retry and mode == MODE_APPLY),
+        )
+
+    if record.status == STATUS_RETIRED:
+        return SourceDecision(
+            source=f, decision=DECISION_RETIRED_SOURCE, record=record,
+            needs_agent=False, needs_apply=False,
         )
 
     if record.status == STATUS_FAILED:

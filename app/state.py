@@ -14,7 +14,9 @@ Hai khái niệm tách biệt (đây là điểm khác biệt cốt lõi so vớ
     file thật + QC PASS)                -> PROCESSED
 
 Một nguồn có tài liệu REVIEW chưa được người vận hành chốt thì KHÔNG BAO GIỜ
-tự chuyển thành PROCESSED, dù đã apply và đã copy ra `review/`.
+tự chuyển thành PROCESSED, dù đã apply và đã copy ra `review/`. Một source đã
+mất bytes được phát hiện là `MISSING_SOURCE`; chỉ operator mới có thể tạo
+tombstone `RETIRED`, không xóa source identity hoặc logical-document history.
 """
 from __future__ import annotations
 
@@ -37,13 +39,18 @@ from .policy import (
 )
 
 DB_FILENAME = "processing_state.db"
-STATE_SCHEMA_VERSION = 2
+STATE_SCHEMA_VERSION = 3
 
 STATUS_PROCESSING = "PROCESSING"
 STATUS_ANALYZED_PENDING_APPLY = "ANALYZED_PENDING_APPLY"
 STATUS_REVIEW_REQUIRED = "REVIEW_REQUIRED"
 STATUS_PROCESSED = "PROCESSED"
 STATUS_FAILED = "FAILED"
+STATUS_RETIRED = "RETIRED"
+
+SOURCE_ACTIVE = "ACTIVE"
+SOURCE_MISSING = "MISSING_SOURCE"
+SOURCE_RETIRED = STATUS_RETIRED
 
 # Các giá trị hợp lệ duy nhất cho cột `status` trong bảng sources.
 PERSISTED_STATUSES = (
@@ -52,6 +59,7 @@ PERSISTED_STATUSES = (
     STATUS_REVIEW_REQUIRED,
     STATUS_PROCESSED,
     STATUS_FAILED,
+    STATUS_RETIRED,
 )
 
 RESOLUTION_AUTO_RESOLVED = "AUTO_RESOLVED"
@@ -97,6 +105,11 @@ class SourceState:
     analysis_schema_version: Optional[str]
     last_seen_path: str
     updated_at: str
+    previous_status: Optional[str]
+    retired_at: Optional[str]
+    retired_reason: Optional[str]
+    retired_by: Optional[str]
+    audit_provenance: Optional[str]
 
     def as_dict(self) -> dict:
         return {f.name: getattr(self, f.name) for f in fields(self)}
@@ -186,6 +199,39 @@ class LegacyHydrationResult:
     source_status: str
 
 
+@dataclass(frozen=True)
+class SourceLifecycle:
+    source_hash: str
+    source_filename: str
+    page_count: int
+    state_status: str
+    lifecycle_status: str
+    previous_status: Optional[str]
+    retired_at: Optional[str]
+    retired_reason: Optional[str]
+    retired_by: Optional[str]
+    audit_provenance: Optional[str]
+
+    def as_dict(self) -> dict:
+        return {f.name: getattr(self, f.name) for f in fields(self)}
+
+
+@dataclass(frozen=True)
+class SourceRetirementResult:
+    outcome: str  # RETIRED | ALREADY_RETIRED
+    source_hash: str
+    source_filename: str
+    status: str
+    previous_status: str
+    retired_at: Optional[str]
+    retired_reason: Optional[str]
+    retired_by: Optional[str]
+    audit_provenance: Optional[str]
+
+    def as_dict(self) -> dict:
+        return {f.name: getattr(self, f.name) for f in fields(self)}
+
+
 def _row_to_logical_document(row: sqlite3.Row) -> LogicalDocumentRow:
     d = dict(row)
     d["source_pages"] = json.loads(d["source_pages"])
@@ -247,6 +293,20 @@ class StateRegistry:
             )
             self._conn.execute(
                 "CREATE INDEX IF NOT EXISTS idx_sources_person ON sources(person_folder)"
+            )
+            self._conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS source_retirements (
+                    source_hash TEXT PRIMARY KEY REFERENCES sources(source_hash),
+                    status TEXT NOT NULL CHECK(status = 'RETIRED'),
+                    previous_status TEXT NOT NULL CHECK(previous_status IN
+                        ('PROCESSING','ANALYZED_PENDING_APPLY','REVIEW_REQUIRED','PROCESSED','FAILED')),
+                    retired_at TEXT NOT NULL,
+                    retired_reason TEXT,
+                    retired_by TEXT NOT NULL,
+                    audit_provenance TEXT NOT NULL
+                )
+                """
             )
             self._conn.execute(
                 """
@@ -333,25 +393,143 @@ class StateRegistry:
         return int(row[0]) if row else 1
 
     # ================= sources: truy vấn (read-only) =================
+    _SOURCE_SELECT = """
+        SELECT
+            s.source_hash, s.source_filename, s.source_relative_path, s.person_folder,
+            s.page_count, COALESCE(r.status, s.status) AS status,
+            s.first_seen_at, s.processing_started_at, s.processed_at,
+            s.logical_document_count, s.manifest_path, s.last_error,
+            s.pipeline_version, s.taxonomy_version, s.analysis_schema_version,
+            s.last_seen_path, s.updated_at,
+            r.previous_status, r.retired_at, r.retired_reason, r.retired_by,
+            r.audit_provenance
+        FROM sources s
+        LEFT JOIN source_retirements r ON r.source_hash = s.source_hash
+    """
+
     def get(self, source_hash: str) -> Optional[SourceState]:
         row = self._conn.execute(
-            "SELECT * FROM sources WHERE source_hash = ?", (source_hash,)
+            self._SOURCE_SELECT + " WHERE s.source_hash = ?", (source_hash,)
         ).fetchone()
         return SourceState(**dict(row)) if row else None
 
     def all(self, person_folder: Optional[str] = None) -> list[SourceState]:
-        if person_folder is None:
-            rows = self._conn.execute("SELECT * FROM sources ORDER BY source_hash").fetchall()
-        else:
-            rows = self._conn.execute(
-                "SELECT * FROM sources WHERE person_folder = ? ORDER BY source_hash",
-                (person_folder,),
-            ).fetchall()
+        query = self._SOURCE_SELECT
+        params: tuple = ()
+        if person_folder is not None:
+            query += " WHERE s.person_folder = ?"
+            params = (person_folder,)
+        query += " ORDER BY s.source_hash"
+        rows = self._conn.execute(query, params).fetchall()
         return [SourceState(**dict(r)) for r in rows]
+
+    def source_lifecycle(
+        self, person_folder: str, present_hashes: Optional[set[str]] = None
+    ) -> list[SourceLifecycle]:
+        """Classify known sources without changing their persisted history.
+
+        ``present_hashes`` comes from the current physical inventory.  When it
+        is omitted, every non-retired source is treated as present, which keeps
+        state-only callers deterministic while CLI/reporting passes inventory
+        hashes for real MISSING_SOURCE detection.
+        """
+        present = present_hashes
+        out: list[SourceLifecycle] = []
+        for source in self.all(person_folder):
+            if source.status == STATUS_RETIRED:
+                lifecycle = SOURCE_RETIRED
+            elif present is None or source.source_hash in present:
+                lifecycle = SOURCE_ACTIVE
+            else:
+                lifecycle = SOURCE_MISSING
+            out.append(
+                SourceLifecycle(
+                    source_hash=source.source_hash,
+                    source_filename=source.source_filename,
+                    page_count=source.page_count,
+                    state_status=source.status,
+                    lifecycle_status=lifecycle,
+                    previous_status=source.previous_status,
+                    retired_at=source.retired_at,
+                    retired_reason=source.retired_reason,
+                    retired_by=source.retired_by,
+                    audit_provenance=source.audit_provenance,
+                )
+            )
+        return out
+
+    def retire_source(
+        self,
+        source_hash: str,
+        *,
+        physical_hashes: set[str],
+        reason: Optional[str] = None,
+        retired_by: str = "operator",
+        audit_provenance: str = "cli:retire-source",
+    ) -> SourceRetirementResult:
+        """Explicitly tombstone one absent source, preserving its identity.
+
+        The caller supplies the current physical inventory hashes.  This
+        makes the safety check part of the state transition API: a source that
+        is present, renamed, or copied under another filename cannot be
+        retired accidentally.  Repeating the same command is a read-only
+        ``ALREADY_RETIRED`` result and does not create a second audit event.
+        """
+        source = self.get(source_hash)
+        if source is None:
+            raise PipelineError(f"retire-source: source hash không tồn tại trong state: {source_hash}")
+        if source.source_hash in physical_hashes:
+            raise PipelineError(
+                f"retire-source: từ chối vì source vẫn tồn tại trên đĩa: {source.source_filename}"
+            )
+        if source.status == STATUS_RETIRED:
+            return SourceRetirementResult(
+                outcome="ALREADY_RETIRED",
+                source_hash=source.source_hash,
+                source_filename=source.source_filename,
+                status=source.status,
+                previous_status=source.previous_status or STATUS_PROCESSED,
+                retired_at=source.retired_at,
+                retired_reason=source.retired_reason,
+                retired_by=source.retired_by,
+                audit_provenance=source.audit_provenance,
+            )
+        if not retired_by or len(retired_by) > 200:
+            raise PipelineError("retire-source: retired_by phải là chuỗi 1..200 ký tự.")
+        if reason is not None and len(reason) > _MAX_ERROR_LEN:
+            raise PipelineError(f"retire-source: reason quá dài (>{_MAX_ERROR_LEN} ký tự).")
+        if not audit_provenance or len(audit_provenance) > 200:
+            raise PipelineError("retire-source: audit_provenance không hợp lệ.")
+
+        previous_status = source.status
+        ts = _now()
+        with self._conn:
+            self._conn.execute(
+                """
+                INSERT INTO source_retirements(
+                    source_hash, status, previous_status, retired_at,
+                    retired_reason, retired_by, audit_provenance
+                ) VALUES (?, 'RETIRED', ?, ?, ?, ?, ?)
+                """,
+                (source_hash, previous_status, ts, reason, retired_by, audit_provenance),
+            )
+        retired = self.get(source_hash)
+        assert retired is not None
+        return SourceRetirementResult(
+            outcome="RETIRED",
+            source_hash=retired.source_hash,
+            source_filename=retired.source_filename,
+            status=retired.status,
+            previous_status=retired.previous_status or previous_status,
+            retired_at=retired.retired_at,
+            retired_reason=retired.retired_reason,
+            retired_by=retired.retired_by,
+            audit_provenance=retired.audit_provenance,
+        )
 
     def export_json(self) -> dict:
         return {
-            "schema": "processing_state.v2",
+            "schema": "processing_state.v3",
             "exported_at": _now(),
             "sources": [s.as_dict() for s in self.all()],
             "logical_documents": [d.as_dict() for d in self._all_logical_documents()],
@@ -380,6 +558,11 @@ class StateRegistry:
         còn sót lại (INTERRUPTED) thay vì mất dấu. Xoá sạch logical_documents
         cũ (nếu có) vì phân tích sắp được làm lại từ đầu.
         """
+        existing = self.get(source_hash)
+        if existing is not None and existing.status == STATUS_RETIRED:
+            raise PipelineError(
+                f"Không thể xử lý lại source RETIRED {source_hash[:12]}…; cần policy operator khác."
+            )
         ts = _now()
         with self._conn:
             self._conn.execute(
@@ -522,10 +705,16 @@ class StateRegistry:
         return [_row_to_logical_document(r) for r in rows]
 
     def logical_documents_for_person(
-        self, person_folder: str, *, type_id: Optional[str] = None
+        self, person_folder: str, *, type_id: Optional[str] = None,
+        include_retired: bool = True,
     ) -> list[LogicalDocumentRow]:
         """Toàn bộ logical_documents của MỌI nguồn đã biết của một người — nền
-        tảng cho global cross-run naming (Phase F/G)."""
+        tảng cho global cross-run naming (Phase F/G).
+
+        Historical rows remain queryable by default.  Active workflow callers
+        pass ``include_retired=False`` so tombstoned source history cannot
+        consume naming slots or enter a new apply plan.
+        """
         q = (
             "SELECT ld.* FROM logical_documents ld "
             "JOIN sources s ON s.source_hash = ld.source_hash "
@@ -535,11 +724,17 @@ class StateRegistry:
         if type_id is not None:
             q += " AND (COALESCE(ld.resolved_type_id, ld.type_id) = ?)"
             params.append(type_id)
+        if not include_retired:
+            q += " AND NOT EXISTS ("
+            q += "SELECT 1 FROM source_retirements sr WHERE sr.source_hash = ld.source_hash"
+            q += ")"
         q += " ORDER BY ld.logical_document_id"
         rows = self._conn.execute(q, params).fetchall()
         return [_row_to_logical_document(r) for r in rows]
 
-    def summarize_person(self, person_folder: str) -> dict[str, int]:
+    def summarize_person(
+        self, person_folder: str, present_hashes: Optional[set[str]] = None
+    ) -> dict[str, int]:
         """Tóm tắt canonical state theo *effective* resolution.
 
         Báo cáo vận hành phải đếm ``resolved_classification_kind`` khi có,
@@ -548,10 +743,24 @@ class StateRegistry:
         (nếu còn được giữ để audit) được tách riêng.
         """
         rows = self.logical_documents_for_person(person_folder)
+        lifecycle = self.source_lifecycle(person_folder, present_hashes)
+        lifecycle_by_hash = {item.source_hash: item.lifecycle_status for item in lifecycle}
+        active_rows = [
+            row for row in rows
+            if lifecycle_by_hash.get(row.source_hash) == SOURCE_ACTIVE
+        ]
+        missing_rows = [
+            row for row in rows
+            if lifecycle_by_hash.get(row.source_hash) == SOURCE_MISSING
+        ]
+        historical_rows = [
+            row for row in rows
+            if lifecycle_by_hash.get(row.source_hash) == SOURCE_RETIRED
+        ]
         taxonomy = supporting = duplicate = 0
         review_pending = review_resolved = auto_resolved = 0
         historical_review_artifacts = 0
-        for row in rows:
+        for row in active_rows:
             kind = row.effective_classification_kind
             if kind == CLASSIFICATION_KIND_TAXONOMY:
                 taxonomy += 1
@@ -573,8 +782,22 @@ class StateRegistry:
             else:  # pragma: no cover - DB CHECK bảo vệ giá trị này
                 raise PipelineError(f"resolution_status không hợp lệ trong state: {row.resolution_status!r}")
 
+        # Missing sources remain a blocker and their unresolved reviews must
+        # stay visible, but their classification is not counted as active
+        # dossier content until the source is restored or explicitly retired.
+        review_pending += sum(
+            row.resolution_status == RESOLUTION_REVIEW_PENDING for row in missing_rows
+        )
+
+        for row in historical_rows:
+            if row.resolution_status == RESOLUTION_REVIEW_RESOLVED and row.target_dir == "review" and row.current_target_filename:
+                historical_review_artifacts += 1
+
         return {
             "logical_documents": len(rows),
+            "active_logical_documents": len(active_rows),
+            "missing_logical_documents": len(missing_rows),
+            "historical_logical_documents": len(historical_rows),
             "taxonomy": taxonomy,
             "supporting": supporting,
             "duplicate": duplicate,
@@ -582,6 +805,12 @@ class StateRegistry:
             "review_resolved": review_resolved,
             "review_pending": review_pending,
             "historical_review_artifacts": historical_review_artifacts,
+            "active_sources": sum(item.lifecycle_status == SOURCE_ACTIVE for item in lifecycle),
+            "missing_sources": sum(item.lifecycle_status == SOURCE_MISSING for item in lifecycle),
+            "retired_sources": sum(item.lifecycle_status == SOURCE_RETIRED for item in lifecycle),
+            "active_pages": sum(item.page_count for item in lifecycle if item.lifecycle_status == SOURCE_ACTIVE),
+            "missing_pages": sum(item.page_count for item in lifecycle if item.lifecycle_status == SOURCE_MISSING),
+            "retired_pages": sum(item.page_count for item in lifecycle if item.lifecycle_status == SOURCE_RETIRED),
         }
 
     def hydrate_legacy_logical_documents(

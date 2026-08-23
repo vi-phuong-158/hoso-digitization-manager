@@ -238,7 +238,7 @@ def test_old_schema_migration_preserves_rows_and_is_idempotent(tmp_path: Path):
     db = tmp_path / "old.db"
     _create_old_schema(db)
     with StateRegistry(db) as registry:
-        assert registry.schema_version == STATE_SCHEMA_VERSION == 2
+        assert registry.schema_version == STATE_SCHEMA_VERSION == 3
         row = registry.get_logical_document("d1")
         assert row is not None
         assert row.type_id == "04"
@@ -247,7 +247,7 @@ def test_old_schema_migration_preserves_rows_and_is_idempotent(tmp_path: Path):
         assert {"classification_kind", "subtype", "duplicate_of", "date_precision",
                 "resolved_subtype", "resolved_date_precision"} <= columns
     with StateRegistry(db) as registry:
-        assert registry.schema_version == 2
+        assert registry.schema_version == 3
         assert registry.get_logical_document("d1").type_id == "04"
 
 

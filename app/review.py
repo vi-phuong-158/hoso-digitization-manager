@@ -44,7 +44,7 @@ class ReviewItem:
 
 def list_pending_reviews(registry: StateRegistry, person_folder: str) -> list[ReviewItem]:
     out = []
-    for row in registry.logical_documents_for_person(person_folder):
+    for row in registry.logical_documents_for_person(person_folder, include_retired=False):
         if row.resolution_status != "REVIEW_PENDING":
             continue
         src = registry.get(row.source_hash)

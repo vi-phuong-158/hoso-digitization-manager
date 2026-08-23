@@ -31,13 +31,13 @@ from typing import Optional
 from .catalog import load_catalog
 from .fingerprint import current_fingerprint
 from .golden import run_all_golden_isolated
-from .incremental import scan_person_folder
+from .incremental import DECISION_RETIRED_SOURCE, scan_person_folder
 from .models import MODE_APPLY, MODE_DRY_RUN, PipelineError
-from .pdf_inventory import build_inventory
+from .pdf_inventory import PersonInventory, build_inventory, list_pdfs, read_source, sha256_file
 from .pipeline import PipelineResult, Workspace, process_person_folder
 from .reconcile import reconcile
 from .review import list_pending_reviews, resolve_review
-from .state import StateRegistry
+from .state import SOURCE_ACTIVE, SOURCE_MISSING, SOURCE_RETIRED, StateRegistry
 from .state_import import import_person_folder, recover_legacy_person_folder
 from .vision_adapter import available_providers
 
@@ -162,7 +162,7 @@ def cmd_process(args: argparse.Namespace) -> int:
         print(json.dumps(result.manifest, ensure_ascii=False, indent=2, sort_keys=True))
     else:
         print_summary(result)
-    if result.status in ("BLOCKED_QC", "BLOCKED_RUNTIME"):
+    if result.status in ("BLOCKED_QC", "BLOCKED_RUNTIME", "BLOCKED_MISSING_SOURCE"):
         return EXIT_BLOCKED
     return EXIT_OK
 
@@ -170,17 +170,27 @@ def cmd_process(args: argparse.Namespace) -> int:
 def cmd_status(args: argparse.Namespace) -> int:
     """Chỉ đọc: không mutate registry, không gọi provider, không mở nội dung PDF."""
     ws = _workspace(args)
-    inv = build_inventory(Path(args.folder))
+    folder = Path(args.folder)
+    pdf_paths = list_pdfs(folder)
+    inv = PersonInventory(folder.name, folder, [read_source(path) for path in pdf_paths])
     output_dir = ws.output / inv.person_folder
     review_dir = ws.review / inv.person_folder
     catalog = load_catalog()
     with StateRegistry(ws.state_db_path) as registry:
+        lifecycle = registry.source_lifecycle(inv.person_folder, {s.sha256 for s in inv.sources})
         scan = scan_person_folder(
             inv, registry, mode=MODE_DRY_RUN, fingerprint=current_fingerprint(catalog),
             output_dir=output_dir, review_dir=review_dir,
         )
     if args.json:
-        print(json.dumps(scan.as_dict(), ensure_ascii=False, indent=2))
+        payload = scan.as_dict()
+        payload["source_lifecycle"] = [item.as_dict() for item in lifecycle]
+        payload["source_lifecycle_counts"] = {
+            SOURCE_ACTIVE: sum(item.lifecycle_status == SOURCE_ACTIVE for item in lifecycle),
+            SOURCE_MISSING: sum(item.lifecycle_status == SOURCE_MISSING for item in lifecycle),
+            SOURCE_RETIRED: sum(item.lifecycle_status == SOURCE_RETIRED for item in lifecycle),
+        }
+        print(json.dumps(payload, ensure_ascii=False, indent=2))
     else:
         c = scan.counts()
         print(f"TOTAL: {len(scan.decisions)}")
@@ -194,6 +204,10 @@ def cmd_status(args: argparse.Namespace) -> int:
             print(f"INTERRUPTED: {c['INTERRUPTED']}")
         if c["DUPLICATE_SOURCE"]:
             print(f"DUPLICATE_SOURCE: {c['DUPLICATE_SOURCE']}")
+        if c[DECISION_RETIRED_SOURCE]:
+            print(f"RETIRED_SOURCE: {c[DECISION_RETIRED_SOURCE]}")
+        for item in lifecycle:
+            print(f"{item.lifecycle_status}: {item.source_filename} (sha256 {item.source_hash})")
         for d in scan.decisions:
             if d.output_mismatch:
                 print(f"STATE_OUTPUT_MISMATCH: {d.source.name}: {d.output_mismatch_detail}")
@@ -250,9 +264,33 @@ def cmd_reconcile(args: argparse.Namespace) -> int:
     ws = _workspace(args)
     person = Path(args.folder).name
     with StateRegistry(ws.state_db_path) as registry:
-        report = reconcile(registry, person, ws.output / person, ws.review / person)
+        report = reconcile(
+            registry, person, ws.output / person, ws.review / person, Path(args.folder)
+        )
     print(report.summary_text())
     return EXIT_OK if report.ok else EXIT_BLOCKED
+
+
+def cmd_retire_source(args: argparse.Namespace) -> int:
+    """Explicit operator transition for a source whose bytes are absent."""
+    folder = Path(args.folder)
+    physical_hashes = {sha256_file(path) for path in list_pdfs(folder)}
+    ws = _workspace(args)
+    with StateRegistry(ws.state_db_path) as registry:
+        result = registry.retire_source(
+            args.source_hash,
+            physical_hashes=physical_hashes,
+            reason=args.reason,
+            retired_by=args.by,
+        )
+    if args.json:
+        print(json.dumps(result.as_dict(), ensure_ascii=False, indent=2))
+    else:
+        print(
+            f"{result.outcome}: {result.source_filename} sha256={result.source_hash} "
+            f"previous_status={result.previous_status} retired_at={result.retired_at}"
+        )
+    return EXIT_OK
 
 
 def cmd_import_state(args: argparse.Namespace) -> int:
@@ -280,14 +318,17 @@ def cmd_state_summary(args: argparse.Namespace) -> int:
     """Tóm tắt canonical effective state cho báo cáo batch/operator."""
     ws = _workspace(args)
     person = Path(args.folder).name
+    current_pdfs = list_pdfs(Path(args.folder))
     with StateRegistry(ws.state_db_path) as registry:
-        summary = registry.summarize_person(person)
+        summary = registry.summarize_person(person, {sha256_file(path) for path in current_pdfs})
     if args.json:
         print(json.dumps({"person_folder": person, **summary}, ensure_ascii=False, indent=2))
     else:
         print(f"STATE SUMMARY: {person}")
         for key in (
-            "logical_documents", "taxonomy", "supporting", "duplicate",
+            "logical_documents", "active_logical_documents", "historical_logical_documents",
+            "active_sources", "missing_sources", "retired_sources", "active_pages",
+            "taxonomy", "supporting", "duplicate",
             "auto_resolved", "review_resolved", "review_pending", "historical_review_artifacts",
         ):
             print(f"  {key}: {summary[key]}")
@@ -421,6 +462,17 @@ def build_parser() -> argparse.ArgumentParser:
     sp = sub.add_parser("reconcile", help="Đối chiếu state DB với file thật trên đĩa (chỉ báo cáo)")
     sp.add_argument("folder")
     sp.set_defaults(func=cmd_reconcile)
+
+    sp = sub.add_parser(
+        "retire-source",
+        help="Operator xác nhận source đã mất khỏi hồ sơ (cần source SHA-256, không tự động)",
+    )
+    sp.add_argument("folder", help="input/<TEN_NGUOI>")
+    sp.add_argument("source_hash", help="SHA-256 source trong state (không dùng filename)")
+    sp.add_argument("--reason", default=None, help="Lý do audit tùy chọn")
+    sp.add_argument("--by", default="operator", help="Operator xác nhận")
+    sp.add_argument("--json", action="store_true")
+    sp.set_defaults(func=cmd_retire_source)
 
     sp = sub.add_parser("inventory", help="Chỉ liệt kê file nguồn + SHA-256")
     sp.add_argument("folder")
