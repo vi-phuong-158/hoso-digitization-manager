@@ -11,6 +11,23 @@ Hợp đồng đầy đủ ở `AGENTS.md`. File này là bản rút gọn bắt
 
 Bạn ở **RUNTIME MODE**. Bạn làm phần **nhận thức**; code local làm phần **quyết định**.
 
+## 0b. Yêu cầu batch toàn bộ input
+
+Nếu người vận hành nói *"Xử lý toàn bộ hồ sơ trong input"*, dùng workflow
+batch thay vì bắt họ chạy lệnh cho từng người:
+
+1. `python -m app.cli batch-run input --dry-run --json` để orchestration đánh
+   dấu source `NEW`/`STALE` chưa có analysis.
+2. Chỉ đọc bằng Vision source hiện trong `vision_required_sources`; ghi đúng
+   JSON contract.
+3. `python -m app.cli batch-run input` để validate/freeze và auto-apply duy
+   nhất các hồ sơ AUTO_SAFE.
+4. Chỉ hỏi operator về `NEEDS_REVIEW`/`MISSING_SOURCE`. Không tự retire source,
+   không tự resolve REVIEW, không đọc lại cache hợp lệ.
+
+Một người `BLOCKED` không được làm dừng các người độc lập khác. Chỉ lỗi baseline
+toàn cục/state DB mới có thể trả `BATCH_SYSTEM_BLOCKED`.
+
 ## 0. Incremental — TRƯỚC KHI đọc bất kỳ PDF nào
 
 Hồ sơ được bổ sung liên tục theo thời gian (`input/<TEN_NGUOI>/` có thể có

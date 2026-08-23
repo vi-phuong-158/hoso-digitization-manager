@@ -28,6 +28,7 @@ import sys
 from pathlib import Path
 from typing import Optional
 
+from .batch import BATCH_SYSTEM_BLOCKED, run_batch
 from .catalog import load_catalog
 from .fingerprint import current_fingerprint
 from .golden import run_all_golden_isolated
@@ -165,6 +166,24 @@ def cmd_process(args: argparse.Namespace) -> int:
     if result.status in ("BLOCKED_QC", "BLOCKED_RUNTIME", "BLOCKED_MISSING_SOURCE"):
         return EXIT_BLOCKED
     return EXIT_OK
+
+
+def cmd_batch_run(args: argparse.Namespace) -> int:
+    """One-command runtime path for all person folders under input/."""
+    ws = _workspace(args)
+    report = run_batch(
+        Path(args.input_dir),
+        workspace=ws,
+        provider_name=args.provider,
+        provider_config=_provider_config(args),
+        apply_enabled=not (args.dry_run or args.no_apply),
+        person=args.person,
+    )
+    if args.json:
+        print(json.dumps(report.as_dict(), ensure_ascii=False, indent=2, sort_keys=True))
+    else:
+        print(report.summary_text())
+    return EXIT_BLOCKED if report.status == BATCH_SYSTEM_BLOCKED else EXIT_OK
 
 
 def cmd_status(args: argparse.Namespace) -> int:
@@ -421,6 +440,19 @@ def build_parser() -> argparse.ArgumentParser:
     )
     add_provider_args(sp, default_provider="agent")
     sp.set_defaults(func=cmd_process)
+
+    sp = sub.add_parser(
+        "batch-run",
+        help="Tự điều phối toàn bộ input/<người>/; chỉ auto-apply hồ sơ AUTO_SAFE",
+    )
+    sp.add_argument("input_dir", help="Thư mục input/ chứa các thư mục hồ sơ")
+    sp.add_argument("--person", default=None, help="Chỉ chạy một tên thư mục hồ sơ")
+    g = sp.add_mutually_exclusive_group()
+    g.add_argument("--dry-run", action="store_true", help="Phân tích/validate nhưng không apply")
+    g.add_argument("--no-apply", action="store_true", help="Alias của --dry-run")
+    sp.add_argument("--json", action="store_true", help="In batch report JSON")
+    add_provider_args(sp, default_provider="agent")
+    sp.set_defaults(func=cmd_batch_run)
 
     sp = sub.add_parser("status", help="Xem trạng thái NEW/ANALYZED/REVIEW/PROCESSED/FAILED (chỉ đọc)")
     sp.add_argument("folder")

@@ -137,3 +137,17 @@ python -m app.cli process "input/Nguyễn Hữu Hải"
 ```
 
 Provider mặc định của `process` là `agent` (đọc `analysis/`). `fixture` chỉ dùng cho test.
+
+## Batch một lệnh
+
+Để xử lý toàn bộ `input/<người>/` theo chính sách AUTO_SAFE:
+
+```bash
+python -m app.cli batch-run input
+```
+
+Batch chỉ apply hồ sơ không có `REVIEW_PENDING`, `MISSING_SOURCE`, lỗi QC,
+collision hay lệch reconciliation. Hồ sơ còn mơ hồ được giữ nguyên để operator
+quyết định, còn các hồ sơ độc lập khác vẫn tiếp tục. Dùng `--dry-run` (hoặc
+`--no-apply`) để chỉ validate/freeze analysis, và `--person "Tên người"` để
+giới hạn một hồ sơ. Report cuối được ghi tại `logs/batch-report.json`.

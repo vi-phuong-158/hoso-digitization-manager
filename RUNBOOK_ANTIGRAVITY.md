@@ -6,6 +6,23 @@
 
 ## Quy trình
 
+### Xử lý toàn bộ input (một yêu cầu vận hành)
+
+Khi người vận hành nói **"Xử lý toàn bộ hồ sơ trong input"**, Runtime Agent
+không cần yêu cầu họ chạy từng lệnh per-person. Agent dùng batch orchestration:
+
+1. Chạy `python -m app.cli batch-run input --dry-run --json` để xác minh
+   baseline và lấy đúng các source `NEW`/`STALE` còn thiếu analysis.
+2. Chỉ đọc bằng Vision những source trong `vision_required_sources`, ghi JSON
+   đúng contract vào `analysis/<người>/`.
+3. Chạy `python -m app.cli batch-run input`.
+4. Chỉ trả batch report cuối và hỏi operator về `NEEDS_REVIEW` hoặc
+   `MISSING_SOURCE`; không dump bước nội bộ nếu không có lỗi/debug.
+
+`batch-run` tự dry-run/validate/freeze trước, rồi chỉ apply từng hồ sơ đạt
+AUTO_SAFE. Một hồ sơ lỗi/review không dừng hồ sơ khác. `RETIRED` chỉ là lịch
+sử, còn `MISSING_SOURCE` luôn được đưa operator — batch không tự retire.
+
 1. Scan hồ sơ. Hồ sơ được **bổ sung liên tục theo thời gian** — cứ thêm PDF mới
    vào đúng thư mục người, không cần dọn PDF cũ.
 2. Đặt các PDF (mới hoặc cũ trộn lẫn) vào `input/<TEN_NGUOI>/`.
@@ -51,6 +68,9 @@ python -m app.cli process "input/<TEN_NGUOI>" --apply
 | `test-golden` | Golden acceptance (mặc định provider `fixture`). |
 | `test-golden --provider agent` | Golden acceptance trên chính output của Agent. |
 | `providers` | Liệt kê provider và catalog. |
+| `batch-run input` | Điều phối toàn bộ các thư mục người; auto-apply chỉ hồ sơ AUTO_SAFE, report `logs/batch-report.json`. |
+| `batch-run input --dry-run` / `--no-apply` | Chỉ plan/validate/freeze analysis, không tạo output/review. |
+| `batch-run input --person "Tên người"` | Giới hạn batch vào một thư mục người. |
 
 Provider mặc định của `process` là `agent`. Không có cờ mạng, không có API key.
 

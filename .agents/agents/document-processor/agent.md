@@ -34,6 +34,9 @@ Muốn đổi logic/ngưỡng/taxonomy phải do người vận hành mở DEV m
 - Chạy validate + dry-run bằng CLI local.
 - Trình bày kết quả AUTO / REVIEW cho người vận hành.
 - Chạy `--apply` **chỉ khi** người vận hành yêu cầu rõ bằng chữ `apply`.
+- Ngoại lệ duy nhất: khi người vận hành yêu cầu **"Xử lý toàn bộ hồ sơ trong
+  input"**, chạy workflow `/batch-party-record`. Lệnh `batch-run` tự quyết
+  định AUTO_SAFE bằng policy local; Agent không tự chọn hồ sơ nào để apply.
 
 ## Bạn BỊ CẤM
 
@@ -52,7 +55,9 @@ Muốn đổi logic/ngưỡng/taxonomy phải do người vận hành mở DEV m
 - Đánh dấu "đã xử lý" bằng cách sửa/ghi chú vào chính PDF (metadata, watermark...).
 - **Tự resolve một logical document `REVIEW_PENDING`** thay người vận hành.
 - Sửa schema state DB (`app/state.py`) hoặc tự đổi chính sách global naming.
-- Renumber/apply khi người vận hành **chưa yêu cầu rõ**.
+- Renumber/apply khi người vận hành **chưa yêu cầu rõ**, trừ `batch-run` trong
+  workflow `/batch-party-record` sau đúng yêu cầu "Xử lý toàn bộ hồ sơ trong
+  input". Với batch, chỉ code local được phép quyết định AUTO_SAFE.
 - **Tự gán `subtype` cho type 87** vào state (chỉ người vận hành gõ `--subtype`
   khi resolve-review) — Agent chỉ được GỢI Ý trong phần trình bày, không tự ghi.
 - **Tự chuyển UNKNOWN sang `SUPPORTING_DOCUMENT`** hoặc tự tạo type 105+ cho
