@@ -231,7 +231,14 @@ Phải kiểm tra kỹ:
 ### 70 vs 86
 - 70: bằng/chứng chỉ **lý luận chính trị**.
 - 86: văn bằng/chứng chỉ chuyên môn, nghiệp vụ, ngoại ngữ, tin học, bồi dưỡng... và các văn bằng phù hợp nhóm này.
-Nếu văn bằng không khớp rõ taxonomy -> REVIEW thay vì ép nhãn.
+- **Bằng tốt nghiệp THPT**: Người vận hành đã chốt xếp vào **Mã 86**.
+
+### Bộ hồ sơ Kết nạp Đảng & Tài liệu Đoàn (Chính sách đã chốt)
+- **Bằng tốt nghiệp THPT** -> xếp vào **Mã 86** (Văn bằng, chứng chỉ).
+- **Các tài liệu Đoàn giới thiệu vào Đảng** (Bản kiểm điểm đoàn viên, Biên bản kiểm phiếu tín nhiệm, Biên bản hội nghị chi đoàn, Báo cáo của chi đoàn đề nghị giới thiệu...) -> xếp vào **Mã 40** (`40.Nghi_quyet_gioi_thieu_doan_vien_uu_tu_vao_Dang`).
+- **Bản kiểm điểm người xin vào Đảng (Mẫu 2B-KNĐ)** -> xếp vào **Mã 37** (`37.Don_xin_vao_Dang`).
+- **Báo cáo kết nạp đảng viên sau khi tổ chức lễ kết nạp** -> xếp vào **Mã 05** (`05.Quyet_dinh_ket_nap_dang_vien`).
+- Không để các tài liệu trên ở dạng `SUPPORTING_DOCUMENT` khi xử lý các hồ sơ tương tự.
 
 ---
 

@@ -202,3 +202,10 @@ YEAR — không được tự bịa thành ngày đầy đủ. Ghi `date_precisi
 so khoảng ngày (theo precision) để xếp thứ tự; nếu khoảng của hai tài liệu
 CHỒNG LẤN nhưng không bằng nhau hệt (vd MONTH "2023-11" và DAY "2023-11-05") →
 `ORDER_AMBIGUOUS`, không tự giả định ai trước ai sau.
+
+**Chính sách chuẩn hóa Bằng THPT & Hồ sơ Đoàn (Operator Confirmed):**
+- **Bằng tốt nghiệp THPT** -> xếp vào **Mã 86** (Văn bằng, chứng chỉ chuyên môn).
+- **Tài liệu Đoàn giới thiệu vào Đảng** (kiểm điểm đoàn viên, kiểm phiếu, biên bản hội nghị, báo cáo chi đoàn đề nghị giới thiệu...) -> xếp vào **Mã 40** (`40.Nghi_quyet_gioi_thieu_doan_vien_uu_tu_vao_Dang`).
+- **Bản kiểm điểm người xin vào Đảng (Mẫu 2B-KNĐ)** -> xếp vào **Mã 37** (`37.Don_xin_vao_Dang`).
+- **Báo cáo kết nạp đảng viên sau khi tổ chức lễ kết nạp** -> xếp vào **Mã 05** (`05.Quyet_dinh_ket_nap_dang_vien`).
+
