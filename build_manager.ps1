@@ -12,7 +12,7 @@ if ((git status --porcelain).Length -ne 0) { throw "Refusing build: commit or re
 $buildSha = (git rev-parse HEAD).Trim().ToLowerInvariant()
 if ($buildSha -notmatch '^[0-9a-f]{40}$') { throw "Could not determine exact Git HEAD." }
 
-$provenancePath = Join-Path ([System.IO.Path]::GetTempPath()) "hoso-manager-$buildSha.json"
+$provenancePath = Join-Path ([System.IO.Path]::GetTempPath()) "build_provenance.json"
 @{
     version = $Version
     build_sha = $buildSha
@@ -22,11 +22,12 @@ $provenancePath = Join-Path ([System.IO.Path]::GetTempPath()) "hoso-manager-$bui
 } | ConvertTo-Json | Set-Content -LiteralPath $provenancePath -Encoding utf8
 
 $distRoot = Join-Path $root "dist"
+$workPath = Join-Path ([System.IO.Path]::GetTempPath()) "hoso-manager-build-$buildSha"
 $bundleName = "HosoManager-v$Version"
 $env:HOSO_BUILD_PROVENANCE = $provenancePath
 $env:HOSO_BUNDLE_NAME = $bundleName
 try {
-    python -m PyInstaller --noconfirm --clean --distpath $distRoot --workpath (Join-Path $root "build") (Join-Path $root "HosoManager.spec")
+    python -m PyInstaller --noconfirm --clean --distpath $distRoot --workpath $workPath (Join-Path $root "HosoManager.spec")
 } finally {
     Remove-Item -LiteralPath Env:HOSO_BUILD_PROVENANCE -ErrorAction SilentlyContinue
     Remove-Item -LiteralPath Env:HOSO_BUNDLE_NAME -ErrorAction SilentlyContinue

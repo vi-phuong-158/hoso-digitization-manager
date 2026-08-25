@@ -20,7 +20,7 @@ def provenance_path() -> Path | None:
     if override:
         return Path(override)
     if getattr(sys, "frozen", False):
-        return Path(sys.executable).resolve().with_name(PROVENANCE_FILENAME)
+        return Path(getattr(sys, "_MEIPASS", Path(sys.executable).resolve().parent)) / PROVENANCE_FILENAME
     return None
 
 
