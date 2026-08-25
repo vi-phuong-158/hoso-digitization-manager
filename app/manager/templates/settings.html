@@ -1,0 +1,3 @@
+{% extends "base.html" %}
+{% block title %}Cấu hình — Digitization Manager{% endblock %}
+{% block content %}<section class="page-head"><div><p class="eyebrow">CẤU HÌNH</p><h1>Cấu hình cục bộ</h1><p class="muted">Không có upload hoặc kết nối dịch vụ ngoài.</p></div></section><section class="panel"><p><strong>Data root</strong></p><p class="path">{{ settings.data_root }}</p><p><strong>Database</strong></p><p class="path">{{ settings.database_path }}</p><p><strong>Bind</strong> {{ settings.host }}:{{ settings.port }}</p><p><strong>Taxonomy</strong> {{ taxonomy_path }}</p></section>{% endblock %}

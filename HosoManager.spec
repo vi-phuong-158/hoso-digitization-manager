@@ -1,0 +1,25 @@
+# -*- mode: python ; coding: utf-8 -*-
+from pathlib import Path
+from PyInstaller.utils.hooks import collect_submodules
+
+ROOT = Path(SPECPATH)
+hidden = collect_submodules("app.manager")
+a = Analysis(
+    [str(ROOT / "app" / "manager" / "entrypoint.py")],
+    pathex=[str(ROOT)],
+    binaries=[],
+    datas=[
+        (str(ROOT / "document_types.json"), "."),
+        (str(ROOT / "app" / "manager" / "templates"), "app/manager/templates"),
+        (str(ROOT / "app" / "manager" / "static"), "app/manager/static"),
+    ],
+    hiddenimports=hidden + ["pypdf"],
+    hookspath=[],
+    hooksconfig={},
+    runtime_hooks=[],
+    excludes=[],
+    noarchive=False,
+)
+pyz = PYZ(a.pure)
+exe = EXE(pyz, a.scripts, [], exclude_binaries=True, name="HosoManager", debug=False, bootloader_ignore_signals=False, strip=False, upx=True, console=True)
+coll = COLLECT(exe, a.binaries, a.datas, strip=False, upx=True, name="HosoManager")

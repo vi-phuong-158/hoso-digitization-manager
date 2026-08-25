@@ -1,0 +1,41 @@
+# Python
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.venv/
+venv/
+
+# Real corpus and runtime state
+/input/
+/output/
+/review/
+/analysis/
+/analysis_blind/
+/logs/
+/state/
+/data/
+*.db
+*.db-wal
+*.db-shm
+*.log
+
+# Local configuration and secrets
+config.local.json
+config.json
+.env
+.env.*
+
+# Build output
+/build/
+/dist/
+
+# PDFs are not repository assets. Keep explicit opt-in paths available for
+# future synthetic fixtures if a test really needs committed PDF bytes.
+*.pdf
+!fixtures/**/*.pdf
+!test_cases/**/*.pdf
+!tests/fixtures/**/*.pdf
+
+# OS
+.DS_Store
+Thumbs.db
