@@ -11,6 +11,7 @@ from fastapi.templating import Jinja2Templates
 from .config import Settings
 from .db import Database
 from .routes import dashboard_context, register_routes
+from .version import APP_NAME, APP_VERSION, BUILD_SHA
 
 
 PACKAGE_DIR = Path(__file__).resolve().parent
@@ -21,7 +22,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     cfg.validate()
     db = Database(cfg.database_path)
     db.initialize()
-    app = FastAPI(title="Hồ sơ Digitization Manager", docs_url=None, redoc_url=None)
+    app = FastAPI(title=APP_NAME, docs_url=None, redoc_url=None)
     app.state.settings = cfg
     app.state.db = db
     app.mount("/static", StaticFiles(directory=PACKAGE_DIR / "static"), name="static")
@@ -36,7 +37,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
     @app.get("/health")
     def health() -> dict:
-        return {"status": "ok", "service": "hoso-digitization-manager", "offline": True}
+        return {"status": "ok", "service": "hoso-digitization-manager", "version": APP_VERSION, "build_sha": BUILD_SHA, "offline": True}
 
     @app.get("/", response_class=HTMLResponse)
     def dashboard(request: Request):
@@ -46,7 +47,18 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     def get_settings(request: Request):
         if request.query_params.get("format") == "json" or "application/json" in request.headers.get("accept", ""):
             return cfg.as_dict()
-        return templates.TemplateResponse(request=request, name="settings.html", context={"settings": cfg, "taxonomy_path": "document_types.json"})
+        backup_dir = cfg.database_path.parent / "backups"
+        backups = []
+        for path in sorted(backup_dir.glob("manager-*.sqlite"), key=lambda item: item.stat().st_mtime, reverse=True) if backup_dir.is_dir() else []:
+            backups.append({"name": path.name, "size_bytes": path.stat().st_size})
+        return templates.TemplateResponse(request=request, name="settings.html", context={
+            "settings": cfg,
+            "taxonomy_path": "document_types.json",
+            "version": APP_VERSION,
+            "build_sha": BUILD_SHA,
+            "db_integrity": db.integrity_check(),
+            "backups": backups,
+        })
 
     @app.post("/settings")
     async def update_settings(request: Request):
@@ -107,4 +119,6 @@ async def _payload(request: Request) -> dict[str, str]:
     return result
 
 
-app = create_app()
+# Keep imports side-effect free: the packaged entrypoint supplies its explicit
+# machine-local settings, while tests and library callers use create_app().
+app = None

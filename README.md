@@ -133,6 +133,11 @@ Thêm provider mới = thêm một file trong `app/providers/` và gọi `regist
 
 ## Chạy
 
+Hướng dẫn thao tác cho người dùng Windows nằm ở
+[`MANAGER_README.md`](MANAGER_README.md). UI manager Phase 11 dùng toàn bộ
+asset local/offline, hỗ trợ machine-specific data root và backup/restore
+metadata an toàn.
+
 ```bash
 python -m pytest tests -q
 ```

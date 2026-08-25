@@ -1,6 +1,9 @@
 from __future__ import annotations
 
 import sqlite3
+import os
+import shutil
+import tempfile
 from contextlib import contextmanager
 from pathlib import Path
 from typing import Any, Iterator
@@ -149,6 +152,46 @@ class Database:
         finally:
             source.close()
         return destination
+
+    def integrity_check(self, source: str | Path | None = None) -> dict[str, Any]:
+        """Validate a metadata database without opening any user PDF."""
+        path = Path(source) if source else self.path
+        if not path.is_file():
+            return {"ok": False, "reason": "Không tìm thấy tệp cơ sở dữ liệu."}
+        try:
+            with sqlite3.connect(path) as conn:
+                result = conn.execute("PRAGMA integrity_check").fetchone()[0]
+                tables = {
+                    row[0]
+                    for row in conn.execute("SELECT name FROM sqlite_master WHERE type='table'").fetchall()
+                }
+            required = {"cases", "documents", "warnings", "case_history", "scan_runs"}
+            missing = sorted(required - tables)
+            if result != "ok":
+                return {"ok": False, "reason": f"SQLite integrity_check: {result}"}
+            if missing:
+                return {"ok": False, "reason": f"Thiếu bảng metadata: {', '.join(missing)}"}
+            return {"ok": True, "tables": len(tables), "size_bytes": path.stat().st_size}
+        except (OSError, sqlite3.DatabaseError) as exc:
+            return {"ok": False, "reason": f"Không đọc được SQLite: {exc}"}
+
+    def restore_from(self, source: str | Path, safety_backup: str | Path) -> Path:
+        """Restore a validated metadata backup with a safety copy and atomic replace."""
+        source_path = Path(source)
+        check = self.integrity_check(source_path)
+        if not check.get("ok"):
+            raise ValueError(str(check.get("reason", "Backup không hợp lệ")))
+        safety_path = self.backup_to(safety_backup)
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        with tempfile.NamedTemporaryFile(prefix="manager-restore-", suffix=".sqlite", dir=self.path.parent, delete=False) as handle:
+            temp_path = Path(handle.name)
+        try:
+            shutil.copy2(source_path, temp_path)
+            os.replace(temp_path, self.path)
+        except Exception:
+            temp_path.unlink(missing_ok=True)
+            raise
+        return safety_path
 
 
     @contextmanager

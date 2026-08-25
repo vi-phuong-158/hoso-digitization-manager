@@ -3,26 +3,39 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="description" content="Quản lý tiến độ số hóa hồ sơ Đảng viên, offline trên máy Windows.">
   <title>{% block title %}Hồ sơ Digitization Manager{% endblock %}</title>
+  <link rel="icon" href="/static/mark.svg" type="image/svg+xml">
   <link rel="stylesheet" href="/static/manager.css">
 </head>
 <body>
+  <a class="skip-link" href="#main-content">Đi tới nội dung</a>
   <div class="app-shell">
-    <aside class="sidebar">
-      <div class="brand"><span class="brand-mark">H</span><span>Hồ sơ<br><small>Digitization Manager</small></span></div>
-      <nav aria-label="Điều hướng chính">
-        <a href="/" class="nav-link">Tổng quan</a>
-        <a href="/cases" class="nav-link">Hồ sơ</a>
-        <a href="/cases?status=CAN_BO_SUNG" class="nav-link">Cần bổ sung</a>
-        <a href="/cases?status=CHO_KIEM_TRA" class="nav-link">Chờ kiểm tra</a>
-        <a href="/cases?warning=1" class="nav-link">Cảnh báo</a>
-        <a href="/settings" class="nav-link">Cấu hình</a>
+    <aside class="sidebar" aria-label="Thanh điều hướng">
+      <a class="brand" href="/" aria-label="Hồ sơ Digitization Manager — Tổng quan"><span class="brand-mark">H</span><span>Hồ sơ<br><small>Digitization Manager</small></span></a>
+      <nav class="nav" aria-label="Điều hướng chính">
+        <a href="/" class="nav-link {% if request.url.path == '/' %}active{% endif %}"><span class="nav-icon">⌂</span>Tổng quan</a>
+        <a href="/cases" class="nav-link {% if request.url.path.startswith('/cases') and not request.url.path.startswith('/cases/') %}active{% endif %}"><span class="nav-icon">▤</span>Hồ sơ</a>
+        <a href="/cases?status=CAN_BO_SUNG" class="nav-link {% if request.query_params.get('status') == 'CAN_BO_SUNG' %}active{% endif %}"><span class="nav-icon">!</span>Cần bổ sung</a>
+        <a href="/cases?status=CHO_KIEM_TRA" class="nav-link {% if request.query_params.get('status') == 'CHO_KIEM_TRA' %}active{% endif %}"><span class="nav-icon">⌕</span>Chờ kiểm tra</a>
+        <a href="/cases?warning=1" class="nav-link {% if request.query_params.get('warning') == '1' %}active{% endif %}"><span class="nav-icon">△</span>Cảnh báo</a>
+        <a href="/scan-runs" class="nav-link {% if request.url.path == '/scan-runs' %}active{% endif %}"><span class="nav-icon">↻</span>Lịch sử quét</a>
+        <a href="/settings" class="nav-link {% if request.url.path == '/settings' %}active{% endif %}"><span class="nav-icon">⚙</span>Cấu hình</a>
       </nav>
-      <div class="sidebar-foot">Offline · localhost</div>
+      <div class="sidebar-foot">
+        <span class="system-dot"></span> Offline · localhost
+        <small class="root-short" title="{{ request.app.state.settings.data_root }}">{{ request.app.state.settings.data_root }}</small>
+      </div>
     </aside>
-    <main class="main-content">
+    <main class="main-content" id="main-content">
+      <header class="topbar">
+        <div><span class="topbar-kicker">HỒ SƠ ĐẢNG VIÊN</span><span class="topbar-title">{% block topbar_title %}Quản lý hồ sơ{% endblock %}</span></div>
+        <button class="button button-quiet" type="button" data-scan-all>↻ <span>Quét lại</span></button>
+      </header>
+      <div id="toast" class="toast" role="status" aria-live="polite"></div>
       {% block content %}{% endblock %}
     </main>
   </div>
+  <script src="/static/manager.js" defer></script>
 </body>
 </html>

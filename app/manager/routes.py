@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import os
 import subprocess
+from datetime import datetime, timezone
 from pathlib import Path
 
 from fastapi import Request
@@ -15,6 +16,22 @@ from .integration import ensure_schema, integrate_case, provider_for
 from .scanner import ScanService
 from .status import mark_complete, now as status_now, recompute_case, reopen, set_checklist_override, set_manual_status, update_note
 from .taxonomy import TaxonomyAdapter
+from .version import APP_NAME, APP_VERSION, BUILD_SHA
+
+
+STATUS_LABELS = {
+    "CHUA_XU_LY": "Chưa xử lý",
+    "DANG_SO_HOA": "Đang số hóa",
+    "CHO_KIEM_TRA": "Chờ kiểm tra",
+    "CAN_BO_SUNG": "Cần bổ sung",
+    "HOAN_THANH": "Hoàn thành",
+}
+CHECKLIST_LABELS = {
+    "CO_TAI_LIEU": "Có tài liệu",
+    "KHONG_PHAT_SINH": "Không phát sinh",
+    "CHUA_XAC_DINH": "Chưa xác định",
+    "CAN_BO_SUNG": "Cần bổ sung",
+}
 
 
 def _json_requested(request: Request) -> bool:
@@ -35,9 +52,25 @@ def dashboard_context(db: Database) -> dict:
     units = {}
     for row in rows:
         unit = row["unit_code"] or "Chưa xác định"
-        units.setdefault(unit, []).append(row["progress_percent"])
-    unit_rows = [{"unit": unit, "progress": round(sum(values) / len(values), 2), "count": len(values)} for unit, values in sorted(units.items())]
-    action_rows = [row for row in rows if row["effective_status"] in {"CAN_BO_SUNG", "DANG_SO_HOA", "CHO_KIEM_TRA"} or row["warning_count"]]
+        units.setdefault(unit, []).append(row)
+    unit_rows = []
+    for unit, unit_cases in sorted(units.items()):
+        completed = sum(row["effective_status"] == "HOAN_THANH" for row in unit_cases)
+        unit_rows.append({
+            "unit": unit,
+            "count": len(unit_cases),
+            "completed": completed,
+            "unfinished": len(unit_cases) - completed,
+            "missing_p1": sum(row["missing_priority1_count"] for row in unit_cases),
+            "progress": round(sum(row["progress_percent"] for row in unit_cases) / len(unit_cases), 2),
+        })
+    def action_key(row):
+        status_rank = {"CAN_BO_SUNG": 1, "DANG_SO_HOA": 2, "CHO_KIEM_TRA": 3}.get(row["effective_status"], 4)
+        return (0 if row["missing_priority1_count"] else 1, status_rank, -row["warning_count"], row["last_scanned_at"] or "")
+    action_rows = sorted(
+        [row for row in rows if row["effective_status"] in {"CAN_BO_SUNG", "DANG_SO_HOA", "CHO_KIEM_TRA"} or row["warning_count"]],
+        key=action_key,
+    )
     last_run = db.one("SELECT * FROM scan_runs ORDER BY id DESC LIMIT 1")
     return {
         "total": total,
@@ -48,6 +81,7 @@ def dashboard_context(db: Database) -> dict:
         "unit_rows": unit_rows,
         "action_rows": action_rows[:10],
         "last_run": _dict(last_run),
+        "status_labels": STATUS_LABELS,
     }
 
 
@@ -62,7 +96,25 @@ def _case_payload(db: Database, case_id: int) -> dict:
         warnings = [dict(item) for item in conn.execute("SELECT * FROM warnings WHERE case_id=? AND active=1 ORDER BY severity DESC,id", (case_id,)).fetchall()]
         history = [dict(item) for item in conn.execute("SELECT * FROM case_history WHERE case_id=? ORDER BY id DESC", (case_id,)).fetchall()]
         pipeline_documents = [dict(item) for item in conn.execute("SELECT * FROM pipeline_documents WHERE case_id=? ORDER BY id", (case_id,)).fetchall()]
-    return {"case": dict(case), "documents": documents, "warnings": warnings, "history": history, "pipeline_documents": pipeline_documents, "checklist": state["checklist"]}
+    checklist = state["checklist"]
+    for item in checklist:
+        item["status_label"] = CHECKLIST_LABELS.get(item["status"], item["status"])
+    return {
+        "case": dict(case),
+        "documents": documents,
+        "warnings": warnings,
+        "history": history,
+        "pipeline_documents": pipeline_documents,
+        "checklist": checklist,
+        "checklist_groups": {
+            1: [item for item in checklist if item["priority"] == 1],
+            2: [item for item in checklist if item["priority"] == 2],
+            3: [item for item in checklist if item["priority"] not in {1, 2}],
+        },
+        "status_label": STATUS_LABELS.get(case["effective_status"], case["effective_status"]),
+        "status_labels": STATUS_LABELS,
+        "checklist_labels": CHECKLIST_LABELS,
+    }
 
 
 def register_routes(app, cfg: Settings, db: Database, templates: Jinja2Templates) -> None:
@@ -94,7 +146,17 @@ def register_routes(app, cfg: Settings, db: Database, templates: Jinja2Templates
         params.append((page - 1) * 100)
         rows = [dict(row) for row in db.all(sql, tuple(params))]
         units = [row["unit_code"] for row in db.all("SELECT DISTINCT unit_code FROM cases WHERE is_present=1 AND unit_code IS NOT NULL ORDER BY unit_code")]
-        context = {"rows": rows, "q": q, "status": status, "unit": unit, "warning": warning, "missing_p1": missing_p1, "sort": sort, "units": units}
+        context = {
+            "rows": rows,
+            "q": q,
+            "status": status,
+            "unit": unit,
+            "warning": warning,
+            "missing_p1": missing_p1,
+            "sort": sort,
+            "units": units,
+            "status_labels": STATUS_LABELS,
+        }
         if _json_requested(request):
             return {"items": rows, "page": page, "count": len(rows)}
         return templates.TemplateResponse(request=request, name="cases.html", context=context)
@@ -180,14 +242,61 @@ def register_routes(app, cfg: Settings, db: Database, templates: Jinja2Templates
         _recompute_all(db, case_id)
         return result.as_dict()
 
+    def _backup_dir() -> Path:
+        path = cfg.database_path.parent / "backups"
+        path.mkdir(parents=True, exist_ok=True)
+        return path
+
+    def _backup_list() -> list[dict]:
+        items = []
+        for path in sorted(_backup_dir().glob("manager-*.sqlite"), key=lambda item: item.stat().st_mtime, reverse=True):
+            check = db.integrity_check(path)
+            items.append({"name": path.name, "path": str(path), "size_bytes": path.stat().st_size, "valid": check.get("ok", False)})
+        return items
+
     @app.get("/backup")
     def backup_metadata():
-        target = cfg.database_path.with_name(cfg.database_path.stem + ".backup.sqlite")
+        stamp = datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S")
+        target = _backup_dir() / f"manager-{stamp}.sqlite"
         db.backup_to(target)
-        return {"ok": True, "path": str(target), "metadata_only": True}
+        return {"ok": True, "path": str(target), "metadata_only": True, "integrity": db.integrity_check(target)}
+
+    @app.post("/backup")
+    async def create_backup(request: Request):
+        if not _csrf_valid(request):
+            return JSONResponse({"detail": "CSRF token không hợp lệ"}, status_code=403)
+        stamp = datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S")
+        target = _backup_dir() / f"manager-{stamp}.sqlite"
+        db.backup_to(target)
+        return {"ok": True, "path": str(target), "metadata_only": True, "integrity": db.integrity_check(target)}
+
+    @app.get("/backups")
+    def backups():
+        return {"items": _backup_list()}
+
+    @app.post("/restore")
+    async def restore_metadata(request: Request):
+        if not _csrf_valid(request):
+            return JSONResponse({"detail": "CSRF token không hợp lệ"}, status_code=403)
+        payload = await _payload(request)
+        name = Path(payload.get("name", "")).name
+        source = _backup_dir() / name
+        if source.parent != _backup_dir() or source.suffix.lower() != ".sqlite" or not source.is_file():
+            return JSONResponse({"detail": "Backup không hợp lệ hoặc không nằm trong thư mục backup của ứng dụng."}, status_code=400)
+        stamp = datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S")
+        safety = _backup_dir() / f"manager-before-restore-{stamp}.sqlite"
+        try:
+            safety_path = db.restore_from(source, safety)
+        except (OSError, ValueError) as exc:
+            return JSONResponse({"detail": str(exc)}, status_code=400)
+        return {"ok": True, "restored": source.name, "safety_backup": str(safety_path), "integrity": db.integrity_check()}
+
     @app.get("/scan-runs")
-    def scan_runs():
-        return {"items": [dict(row) for row in db.all("SELECT * FROM scan_runs ORDER BY id DESC LIMIT 50")]}
+    def scan_runs(request: Request):
+        items = [dict(row) for row in db.all("SELECT * FROM scan_runs ORDER BY id DESC LIMIT 50")]
+        if _json_requested(request):
+            return {"items": items}
+        return templates.TemplateResponse(request=request, name="scan_runs.html", context={"items": items})
 
     @app.get("/open/case/{case_id}")
     def open_case(case_id: int):

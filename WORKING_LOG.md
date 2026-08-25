@@ -20,3 +20,30 @@
 - `MIGRATION_REPORT.md` records the final migration verdict, safety gates and limitations.
 
 Validation and Git/GitHub results are appended after each gate is run.
+
+## 2026-08-25 — Phase 11 productization
+
+- Starting checkout: `main`, SHA `d9938410ac0c75cabff7b83d59f9f9307bbf9e78`; created `feat/phase-11-productization` after `git pull --ff-only` reported up to date.
+- UX audit recorded in `docs/PHASE11_UX_BASELINE.md`; real data was not opened or captured.
+- Refined manager shell, dashboard, cases table, case detail, checklist, settings, scan history and local CSS/JS/SVG assets. Added Vietnamese status language, loading/error/empty/toast states and row navigation.
+- Added metadata backup/restore routes and database integrity validation. Restore validates the backup, creates a safety backup and atomically replaces only the SQLite metadata file.
+- Added `v0.2.0` identity, startup diagnostics, no-console launcher, server-start wait, single-instance notification and per-user Inno Setup script.
+- Added Phase 11 fixture tests: `3 passed`; existing manager tests: `23 passed`.
+- Full suite checkpoint: `329 passed, 2 skipped, 1 failed` on the first run because the runtime no-network gate correctly rejected an initial `socket` import in the launcher. Removed that import and retained the offline `uvicorn.Server.started` readiness signal.
+- Rebuilt PyInstaller onedir executable from repository source: build completed; bounded executable smoke still requires a clean follow-up runtime investigation before PASS.
+- Inno Setup compiler was not present (`ISCC_NOT_FOUND`); installer artifact is therefore pending and no installer PASS is claimed.
+- Full final validation: `333 passed, 2 skipped, 0 failed`; Golden CLI: `18 logical documents / 29 pages`, PASS.
+- Visual QA with synthetic fixture at 1366×768 covered empty dashboard, populated dashboard, cases/filter table and case detail. Found and fixed empty-state scan binding; no real-data screenshot was used or committed.
+- Source offline/security gate passed in the full suite. The only URL reference is the local browser address `127.0.0.1`; no CDN/font/telemetry asset was added.
+- No commit, push, PR, merge or tag was created in this session. Branch remains reviewable with uncommitted Phase 11 changes.
+
+## 2026-08-25 — Phase 11B runtime and release closure
+
+- Diagnosed the packaged GUI startup path with milestone logging. The issue was slow PyInstaller cold-start plus Uvicorn console logging in a GUI build without console streams.
+- Switched startup logging to append mode, disabled Uvicorn console logging for the GUI bundle, and lazy-loaded `pypdf` from the scan path.
+- Rebuilt the GUI artifact and verified cold-start `/health` in `59.1s`; warm restart was `1.2s` and configuration/database persistence remained intact.
+- Rehearsed the second-instance path: the original listener stayed healthy and the second launch used the local notification path without replacing the server.
+- Full validation after Phase 11B changes: `333 passed, 2 skipped, 0 failed`; Golden `18 logical documents / 29 pages`, PASS.
+- Synthetic scale benchmark: `500 cases / 5,000 PDFs`; first scan `11.198s`, warm scan `9.109s`, unchanged warm rehashes `0`.
+- `ISCC.exe` remains unavailable. The official Inno Setup installation attempt was rejected at the external system-install approval gate; installer build, clean install, shortcut and uninstall gates remain pending.
+- No commit, push, PR, merge or release tag was created while the mandatory installer gate is red.
