@@ -39,7 +39,8 @@ class Settings:
             if not value:
                 return default
             candidate = Path(value)
-            return candidate if candidate.is_absolute() else (base / candidate).resolve()
+            windows_drive_path = len(value) >= 3 and value[1] == ":" and value[2] in "\\/"
+            return candidate.resolve() if candidate.is_absolute() or windows_drive_path else (base / candidate).resolve()
 
         integration = raw.get("integration") or {}
         data_root_value = os.environ.get("HOSO_DATA_ROOT") or raw.get("data_root")
@@ -80,7 +81,7 @@ class Settings:
     def save(self, path: str | Path | None = None) -> Path:
         target = Path(path) if path else self.config_path
         if target is None:
-            target = REPO_ROOT / "manager-config.json"
+            target = REPO_ROOT / "config.local.json"
         target.parent.mkdir(parents=True, exist_ok=True)
         target.write_text(json.dumps(self.as_dict(), ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
         self.config_path = target

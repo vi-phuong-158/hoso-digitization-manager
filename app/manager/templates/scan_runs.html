@@ -1,0 +1,7 @@
+{% extends "base.html" %}
+{% block title %}Lịch sử quét — Digitization Manager{% endblock %}
+{% block topbar_title %}Lịch sử quét{% endblock %}
+{% block content %}
+<section class="page-head"><div><p class="eyebrow">NHẬT KÝ QUÉT</p><h1>Lịch sử quét</h1><p class="muted">Tóm tắt các lần quét incremental. Không ghi toàn văn hồ sơ vào log.</p></div></section>
+{% if items %}<div class="table-wrap"><table><thead><tr><th>Bắt đầu</th><th>Kết thúc</th><th>Trạng thái</th><th>Thư mục</th><th>PDF</th><th>Mới</th><th>Cập nhật</th><th>Lỗi</th><th>Thời lượng</th></tr></thead><tbody>{% for item in items %}<tr><td>{{ item.started_at }}</td><td>{{ item.ended_at or 'Đang chạy' }}</td><td><span class="status-badge status-{{ item.status|lower }}">{{ item.status }}</span></td><td>{{ item.folders_seen }}</td><td>{{ item.files_seen }}</td><td>{{ item.docs_created }}</td><td>{{ item.docs_updated }}</td><td>{% if item.errors %}<span class="number-warn">{{ item.errors }}</span>{% else %}—{% endif %}</td><td>{{ item.duration_ms or '—' }}{% if item.duration_ms %} ms{% endif %}</td></tr>{% endfor %}</tbody></table></div>{% else %}<section class="empty-state"><span class="empty-mark">↻</span><h2>Chưa có lần quét nào</h2><p>Quét data root để bắt đầu ghi nhận lịch sử.</p><button class="button primary" type="button" data-scan-all>Quét lại</button></section>{% endif %}
+{% endblock %}

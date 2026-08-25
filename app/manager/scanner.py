@@ -8,8 +8,6 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
 
-from pypdf import PdfReader
-
 from ..pdf_inventory import sha256_file
 from .config import Settings
 from .db import Database
@@ -92,6 +90,8 @@ class ScanService:
         return [p for p in sorted(root.iterdir(), key=lambda x: x.name.casefold()) if p.is_dir() and not self._ignored(p.name)]
 
     def _scan_folder(self, conn, root: Path, folder: Path, result: ScanResult) -> None:
+        from pypdf import PdfReader
+
         metadata = parse_folder_name(folder.name)
         case_key = folder.relative_to(root).as_posix()
         now = utc_now()

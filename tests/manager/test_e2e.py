@@ -12,7 +12,7 @@ def test_offline_pilot_flow_scan_dashboard_filter_detail(tmp_path: Path):
     root = tmp_path / "pilot-data"
     fixtures = build_fixture_tree(root)
     settings = Settings(data_root=root, database_path=tmp_path / "manager.db")
-    client = TestClient(create_app(settings))
+    client = TestClient(create_app(settings), base_url="http://127.0.0.1")
     dashboard = client.get("/")
     assert dashboard.status_code == 200
     token = client.cookies.get("csrf_token")
@@ -37,7 +37,7 @@ def test_offline_pilot_flow_scan_dashboard_filter_detail(tmp_path: Path):
 
 def test_no_external_assets_in_ui(tmp_path: Path):
     settings = Settings(data_root=tmp_path / "input", database_path=tmp_path / "db.sqlite")
-    client = TestClient(create_app(settings))
+    client = TestClient(create_app(settings), base_url="http://127.0.0.1")
     html = client.get("/").text.lower()
     assert "cdn" not in html
     assert "http://" not in html

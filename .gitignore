@@ -21,6 +21,7 @@ venv/
 
 # Local configuration and secrets
 config.local.json
+manager-config.json
 config.json
 .env
 .env.*

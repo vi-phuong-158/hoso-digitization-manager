@@ -12,7 +12,7 @@ def test_scan_list_detail_and_actions(tmp_path: Path):
     folder = root / "25.000.036.001.015_012345678901_Nguyen_Van_A"; folder.mkdir()
     make_pdf(folder / "01.Ly_lich_nguoi_xin_vao_dang.pdf")
     settings = Settings(data_root=root, database_path=tmp_path / "data" / "manager.db")
-    client = TestClient(create_app(settings))
+    client = TestClient(create_app(settings), base_url="http://127.0.0.1")
     client.get("/")
     token = client.cookies.get("csrf_token")
     assert token
@@ -36,5 +36,5 @@ def test_scan_list_detail_and_actions(tmp_path: Path):
 def test_open_document_does_not_accept_arbitrary_path(tmp_path: Path):
     root = tmp_path / "input"; root.mkdir()
     settings = Settings(data_root=root, database_path=tmp_path / "db.sqlite")
-    client = TestClient(create_app(settings))
+    client = TestClient(create_app(settings), base_url="http://127.0.0.1")
     assert client.get("/open/document/999").status_code == 404

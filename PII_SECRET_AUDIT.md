@@ -1,6 +1,6 @@
 # PII and secret audit
 
-Date: 2026-08-25 (Asia/Saigon)
+Date: 2026-08-25 (Asia/Saigon); Phase 11C public-repository re-audit
 
 ## Scope
 
@@ -18,10 +18,13 @@ from the real corpus.
 - Real corpus manifest/ledger candidate: **NO**
 - Personal names copied from the real corpus: **NO**
 - Production source code hard-coded to the laptop or desktop data path: **NO**
+- Public repository audit: **PASS**
 
 The Golden assets use the label `Synthetic Person` and generate blank PDFs plus
 temporary analysis in the test workspace. Any CCCD-shaped values in manager unit
 fixtures are deterministic synthetic test values, not corpus records.
 
-`config.local.json` contains the laptop data root for local execution and is
-ignored by Git. It is not part of the commit or push candidate.
+`config.local.json` is machine-local, ignored by Git, and not part of the
+repository. Public docs intentionally omit exact workstation paths and source
+inventory counts. Synthetic fixture identifiers and deterministic CCCD-shaped
+values in tests are not production records.
