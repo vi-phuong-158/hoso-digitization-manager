@@ -37,8 +37,8 @@ remains pending until the pushed PR has green CI and is merged into `main`.
 
 - Build command: `build_manager.ps1`.
 - Portable bundle: `dist/HosoManager/HosoManager.exe`.
-- Final release rebuild and embedded build SHA are recorded after the source
-  commit is created.
+- Release-candidate source commit: `089ba0f85b7dc763bd2999ed1824e2b926f73ba9`.
+- Final EXE SHA-256: `bf42078ada9b0f3dcb35c03e6410ce45ee03273b9d8fb8b4b072b8023a276368`.
 
 ## INSTALLER
 
@@ -51,6 +51,8 @@ remains pending until the pushed PR has green CI and is merged into `main`.
   `config.local.json` was preserved as expected and the temporary install root
   was then removed.
 - Installer artifact checksum is refreshed after the final release rebuild.
+- Final installer size: `30.65 MB`; SHA-256:
+  `e5cbd43191c379d88deb8a2006949cb5add39728aba9b372a3db532df9361e5a`.
 
 ## CI
 
@@ -100,6 +102,11 @@ Real corpus opened: NO
 - PR: pending creation after the release-candidate commit is pushed.
 - Required review scope: security/runtime hardening, CI, packaging and public
   repository audit only; no taxonomy or Golden changes.
+
+## GIT
+
+- Release-candidate branch: `feat/phase-11-productization`.
+- Release-candidate commit: `089ba0f85b7dc763bd2999ed1824e2b926f73ba9`.
 
 ## MERGE
 
