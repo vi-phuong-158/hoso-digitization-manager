@@ -31,22 +31,64 @@ def content_key(source_sha256: str, pages: Sequence[int]) -> str:
     return hashlib.sha256(raw.encode("utf-8")).hexdigest()
 
 
+import shutil
+from .oplog import EVENT_WRITE_COMPLETED, log_event
+
+MIN_FREE_BYTES = 5 * 1024 * 1024  # 5 MB safety margin
+
+
+def check_disk_capacity(target_dir: Path, required_bytes: int = MIN_FREE_BYTES) -> None:
+    """Kiểm tra dung lượng đĩa khả dụng trước khi ghi file đầu ra."""
+    try:
+        usage = shutil.disk_usage(target_dir if target_dir.exists() else target_dir.parent)
+        if usage.free < required_bytes:
+            raise PipelineError(
+                f"Không đủ dung lượng đĩa tại '{target_dir}' (còn {usage.free // 1024} KB, yêu cầu tối thiểu {required_bytes // 1024} KB)."
+            )
+    except (OSError, ValueError):
+        pass  # Nếu filesystem không hỗ trợ disk_usage thì bỏ qua
+
+
 def split_pages(source_path: Path, pages: Sequence[int], target_path: Path) -> None:
     """Ghi các trang `pages` (1-based, giữ nguyên thứ tự) ra `target_path`."""
-    reader = PdfReader(str(source_path))
-    total = len(reader.pages)
-    writer = PdfWriter()
-    for p in pages:
-        if not (1 <= p <= total):
-            raise PipelineError(f"Trang {p} nằm ngoài '{source_path.name}' ({total} trang).")
-        writer.add_page(reader.pages[p - 1])
-    # Metadata cố định -> output deterministic, không nhúng thời điểm chạy.
-    writer.add_metadata({"/Producer": PRODUCER, "/Creator": PRODUCER})
+    target_path = Path(target_path)
     target_path.parent.mkdir(parents=True, exist_ok=True)
+    check_disk_capacity(target_path.parent)
+
+    try:
+        reader = PdfReader(str(source_path))
+        total = len(reader.pages)
+        writer = PdfWriter()
+        for p in pages:
+            if not (1 <= p <= total):
+                raise PipelineError(f"Trang {p} nằm ngoài '{source_path.name}' ({total} trang).")
+            writer.add_page(reader.pages[p - 1])
+        # Metadata cố định -> output deterministic, không nhúng thời điểm chạy.
+        writer.add_metadata({"/Producer": PRODUCER, "/Creator": PRODUCER})
+    except PipelineError:
+        raise
+    except Exception as exc:
+        raise PipelineError(f"Lỗi đọc/chuẩn bị trang từ '{source_path.name}': {exc}") from exc
+
     tmp = target_path.with_suffix(target_path.suffix + ".part")
-    with open(tmp, "wb") as fh:
-        writer.write(fh)
-    tmp.replace(target_path)
+    try:
+        with open(tmp, "wb") as fh:
+            writer.write(fh)
+        tmp.replace(target_path)
+        log_event(
+            EVENT_WRITE_COMPLETED,
+            component="writer",
+            message=f"Đã ghi file đầu ra: {target_path.name}",
+            metadata={"target": str(target_path), "pages": list(pages)},
+        )
+    except OSError as exc:
+        if tmp.is_file():
+            try:
+                tmp.unlink(missing_ok=True)
+            except OSError:
+                pass
+        raise PipelineError(f"Ghi file '{target_path.name}' thất bại (lỗi I/O / đĩa đầy): {exc}") from exc
+
 
 
 @dataclass

@@ -250,6 +250,10 @@ def execute_rename_plan(
                 f"(logical_document_id={op.logical_document_id}). Không đổi gì cả."
             )
 
+    from .oplog import EVENT_RENAME_COMPLETED, log_event
+    from .writer import check_disk_capacity
+
+    check_disk_capacity(output_dir)
     tmp_dir = output_dir / ".rename_tmp"
     tmp_dir.mkdir(parents=True, exist_ok=True)
     # Ngăn xếp các hành động ĐÃ LÀM, mỗi phần tử là một hàm undo - rollback
@@ -262,17 +266,17 @@ def execute_rename_plan(
         for op in moves:
             src = _dir(op.old_dir) / op.old_filename
             tmp = tmp_dir / f"{uuid.uuid4().hex}.pdf"
-            src.rename(tmp)
+            src.replace(tmp)
             tmp_of[op.logical_document_id] = tmp
-            undo_stack.append(lambda t=tmp, s=src: t.rename(s))
+            undo_stack.append(lambda t=tmp, s=src: t.replace(s) if t.is_file() else None)
 
         # Pha 2a: từ tên tạm -> tên đích cuối cùng.
         for op in moves:
             dest = _dir(op.new_dir) / op.new_filename
             dest.parent.mkdir(parents=True, exist_ok=True)
             tmp = tmp_of[op.logical_document_id]
-            tmp.rename(dest)
-            undo_stack.append(lambda d=dest, t=tmp: d.rename(t))
+            tmp.replace(dest)
+            undo_stack.append(lambda d=dest, t=tmp: d.replace(t) if d.is_file() else None)
 
         # Pha 2b: tài liệu hoàn toàn mới - tách trang trực tiếp ra tên đích.
         for op in creates:
@@ -280,6 +284,13 @@ def execute_rename_plan(
             dest.parent.mkdir(parents=True, exist_ok=True)
             split_pages(source_path_of[op.logical_document_id], pages_of[op.logical_document_id], dest)
             undo_stack.append(lambda d=dest: d.unlink(missing_ok=True))
+        
+        log_event(
+            EVENT_RENAME_COMPLETED,
+            component="global_naming",
+            message=f"Đã thực thi rename plan: {len(moves)} move, {len(creates)} create",
+            metadata={"moves": len(moves), "creates": len(creates)},
+        )
     except Exception as exc:
         for undo in reversed(undo_stack):
             try:
@@ -289,6 +300,13 @@ def execute_rename_plan(
         raise PipelineError(f"Rename plan thất bại giữa chừng, đã rollback: {exc}") from exc
     finally:
         try:
-            tmp_dir.rmdir()
+            # Dọn dẹp bất kỳ file tạm thừa nào nếu có trước khi xoá thư mục tạm
+            if tmp_dir.is_dir():
+                for tmp_file in tmp_dir.iterdir():
+                    try:
+                        tmp_file.unlink(missing_ok=True)
+                    except OSError:
+                        pass
+                tmp_dir.rmdir()
         except OSError:
             pass  # còn file tạm (case lỗi) hoặc thư mục dùng chung - không sao
