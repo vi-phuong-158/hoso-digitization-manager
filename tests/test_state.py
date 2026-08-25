@@ -229,3 +229,34 @@ def test_import_processed_khong_ghi_de_record_da_co(registry):
         person_folder="P", page_count=3, logical_document_count=99, manifest_path="KHAC",
     )
     assert registry.get("h1").logical_document_count == 1  # không bị import ghi đè
+
+
+# ---------------- backup / restore ----------------
+def test_state_registry_backup_restore_and_integrity(registry, tmp_path: Path):
+    begin(registry, h="h10", name="doc10.pdf", person="P10")
+    registry.save_analysis("h10", documents=[doc()], taxonomy_version="t", analysis_schema_version="1.0")
+    registry.commit_processed("h10", logical_document_count=1, manifest_path="x")
+
+    # Integrity check on live db
+    check = StateRegistry.integrity_check(registry.db_path)
+    assert check["ok"] is True
+    assert check["tables"] >= 3
+
+    # Backup to destination
+    backup_file = tmp_path / "backups" / "state_backup.db"
+    backed_up = registry.backup_to(backup_file)
+    assert backed_up.is_file()
+
+    # Mutate live registry
+    begin(registry, h="h11", name="doc11.pdf", person="P10")
+    assert registry.get("h11") is not None
+
+    # Restore from backup
+    safety_backup = tmp_path / "backups" / "safety.db"
+    registry.restore_from(backup_file, safety_backup)
+
+    # After restore, h10 is present, but mutated h11 is gone
+    assert registry.get("h10") is not None
+    assert registry.get("h11") is None
+    assert safety_backup.is_file()
+

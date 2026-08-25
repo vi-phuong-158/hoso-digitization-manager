@@ -25,7 +25,7 @@ import sqlite3
 from dataclasses import dataclass, fields
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Optional
+from typing import Any, Optional
 
 from . import __version__ as PIPELINE_VERSION
 from .models import PipelineError
@@ -264,6 +264,70 @@ class StateRegistry:
 
     def __exit__(self, *exc) -> None:
         self.close()
+
+    @classmethod
+    def integrity_check(cls, db_path: Path | str) -> dict[str, Any]:
+        """Kiểm tra tính toàn vẹn của state database không qua mở PDF."""
+        path = Path(db_path)
+        if not path.is_file():
+            return {"ok": False, "reason": "Không tìm thấy tệp state database."}
+        try:
+            with sqlite3.connect(str(path)) as conn:
+                result = conn.execute("PRAGMA integrity_check").fetchone()[0]
+                tables = {
+                    row[0]
+                    for row in conn.execute("SELECT name FROM sqlite_master WHERE type='table'").fetchall()
+                }
+            required = {"sources", "logical_documents", "source_retirements"}
+            missing = sorted(required - tables)
+            if result != "ok":
+                return {"ok": False, "reason": f"SQLite integrity_check: {result}"}
+            if missing:
+                return {"ok": False, "reason": f"Thiếu bảng state: {', '.join(missing)}"}
+            return {"ok": True, "tables": len(tables), "size_bytes": path.stat().st_size}
+        except (OSError, sqlite3.DatabaseError) as exc:
+            return {"ok": False, "reason": f"Không đọc được state SQLite: {exc}"}
+
+    def backup_to(self, destination: Path | str) -> Path:
+        """Tạo bản backup an toàn của state database bằng SQLite backup API."""
+        dest_path = Path(destination)
+        dest_path.parent.mkdir(parents=True, exist_ok=True)
+        dest_conn = sqlite3.connect(str(dest_path))
+        try:
+            self._conn.backup(dest_conn)
+            dest_conn.commit()
+        finally:
+            dest_conn.close()
+        from .oplog import EVENT_BACKUP_COMPLETED, log_event
+        log_event(
+            EVENT_BACKUP_COMPLETED,
+            component="state",
+            message=f"Đã sao lưu state database ra {dest_path.name}",
+            metadata={"destination": str(dest_path), "size_bytes": dest_path.stat().st_size},
+        )
+        return dest_path
+
+    def restore_from(self, source: Path | str, safety_backup: Path | str) -> Path:
+        """Khôi phục state database từ bản backup hợp lệ, tạo safety copy trước."""
+        source_path = Path(source)
+        check = self.integrity_check(source_path)
+        if not check.get("ok"):
+            raise ValueError(str(check.get("reason", "Bản backup state không hợp lệ")))
+        safety_path = self.backup_to(safety_backup)
+        src_conn = sqlite3.connect(str(source_path))
+        try:
+            src_conn.backup(self._conn)
+            self._conn.commit()
+        finally:
+            src_conn.close()
+        from .oplog import EVENT_RESTORE_COMPLETED, log_event
+        log_event(
+            EVENT_RESTORE_COMPLETED,
+            component="state",
+            message=f"Đã khôi phục state database từ {source_path.name}",
+            metadata={"source": str(source_path), "safety_backup": str(safety_path)},
+        )
+        return safety_path
 
     def _init_schema(self) -> None:
         with self._conn:
