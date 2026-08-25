@@ -1,0 +1,72 @@
+('G:\\Other computers\\My Laptop\\01. Công việc\\Số hóa hồ sơ Đảng '
+ 'viên\\build\\HosoManager\\HosoManager.pkg',
+ {'BINARY': True,
+  'DATA': True,
+  'EXECUTABLE': True,
+  'EXTENSION': True,
+  'PYMODULE': True,
+  'PYSOURCE': True,
+  'PYZ': False,
+  'SPLASH': True,
+  'SYMLINK': False},
+ [('pyi-contents-directory _internal', '', 'OPTION'),
+  ('PYZ-00.pyz',
+   'G:\\Other computers\\My Laptop\\01. Công việc\\Số hóa hồ sơ Đảng '
+   'viên\\build\\HosoManager\\PYZ-00.pyz',
+   'PYZ'),
+  ('struct',
+   'G:\\Other computers\\My Laptop\\01. Công việc\\Số hóa hồ sơ Đảng '
+   'viên\\build\\HosoManager\\localpycs\\struct.pyc',
+   'PYMODULE'),
+  ('pyimod01_archive',
+   'G:\\Other computers\\My Laptop\\01. Công việc\\Số hóa hồ sơ Đảng '
+   'viên\\build\\HosoManager\\localpycs\\pyimod01_archive.pyc',
+   'PYMODULE'),
+  ('pyimod02_importers',
+   'G:\\Other computers\\My Laptop\\01. Công việc\\Số hóa hồ sơ Đảng '
+   'viên\\build\\HosoManager\\localpycs\\pyimod02_importers.pyc',
+   'PYMODULE'),
+  ('pyimod03_ctypes',
+   'G:\\Other computers\\My Laptop\\01. Công việc\\Số hóa hồ sơ Đảng '
+   'viên\\build\\HosoManager\\localpycs\\pyimod03_ctypes.pyc',
+   'PYMODULE'),
+  ('pyimod04_pywin32',
+   'G:\\Other computers\\My Laptop\\01. Công việc\\Số hóa hồ sơ Đảng '
+   'viên\\build\\HosoManager\\localpycs\\pyimod04_pywin32.pyc',
+   'PYMODULE'),
+  ('pyiboot01_bootstrap',
+   'C:\\Users\\Vi '
+   'Phuong\\AppData\\Local\\Programs\\Python\\Python312\\Lib\\site-packages\\PyInstaller\\loader\\pyiboot01_bootstrap.py',
+   'PYSOURCE'),
+  ('pyi_rth_inspect',
+   'C:\\Users\\Vi '
+   'Phuong\\AppData\\Local\\Programs\\Python\\Python312\\Lib\\site-packages\\PyInstaller\\hooks\\rthooks\\pyi_rth_inspect.py',
+   'PYSOURCE'),
+  ('pyi_rth_pkgutil',
+   'C:\\Users\\Vi '
+   'Phuong\\AppData\\Local\\Programs\\Python\\Python312\\Lib\\site-packages\\PyInstaller\\hooks\\rthooks\\pyi_rth_pkgutil.py',
+   'PYSOURCE'),
+  ('pyi_rth_multiprocessing',
+   'C:\\Users\\Vi '
+   'Phuong\\AppData\\Local\\Programs\\Python\\Python312\\Lib\\site-packages\\PyInstaller\\hooks\\rthooks\\pyi_rth_multiprocessing.py',
+   'PYSOURCE'),
+  ('pyi_rth_cryptography_openssl',
+   'C:\\Users\\Vi '
+   'Phuong\\AppData\\Local\\Programs\\Python\\Python312\\Lib\\site-packages\\_pyinstaller_hooks_contrib\\rthooks\\pyi_rth_cryptography_openssl.py',
+   'PYSOURCE'),
+  ('pyi_rth_setuptools',
+   'C:\\Users\\Vi '
+   'Phuong\\AppData\\Local\\Programs\\Python\\Python312\\Lib\\site-packages\\PyInstaller\\hooks\\rthooks\\pyi_rth_setuptools.py',
+   'PYSOURCE'),
+  ('entrypoint',
+   'G:\\Other computers\\My Laptop\\01. Công việc\\Số hóa hồ sơ Đảng '
+   'viên\\app\\manager\\entrypoint.py',
+   'PYSOURCE')],
+ 'python312.dll',
+ True,
+ False,
+ False,
+ [],
+ None,
+ None,
+ None)
