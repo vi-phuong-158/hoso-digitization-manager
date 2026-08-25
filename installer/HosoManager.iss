@@ -19,7 +19,7 @@ WizardStyle=modern
 UninstallDisplayIcon={app}\{#MyAppExeName}
 
 [Files]
-Source: "..\dist\HosoManager\*"; DestDir: "{app}"; Excludes: "config.json,*.db,*.sqlite,*.sqlite-wal,*.sqlite-shm,*.lock"; Flags: ignoreversion recursesubdirs createallsubdirs
+Source: "..\dist\HosoManager\*"; DestDir: "{app}"; Excludes: "config.json,config.local.json,*.db,*.sqlite,*.sqlite-wal,*.sqlite-shm,*.lock,*.log,*.pdf,input\*,output\*,review\*,backups\*"; Flags: ignoreversion recursesubdirs createallsubdirs
 
 [Icons]
 Name: "{group}\{#MyAppName}"; Filename: "{app}\{#MyAppExeName}"

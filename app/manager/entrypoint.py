@@ -68,8 +68,23 @@ def write_startup_log(root: Path, message: str) -> None:
         pass
 
 
-def main() -> None:
-    root = executable_root()
+def notify_startup_failure() -> None:
+    if sys.platform != "win32":
+        return
+    try:
+        import ctypes
+
+        ctypes.windll.user32.MessageBoxW(
+            0,
+            "Không thể khởi động Hồ sơ Digitization Manager. Vui lòng xem startup.log để biết chi tiết.",
+            "Hồ sơ Digitization Manager",
+            0x10,
+        )
+    except Exception:
+        pass
+
+
+def _run(root: Path) -> None:
     write_startup_log(root, "starting")
     local_config_path = root / "config.local.json"
     default_config_path = root / "config.json"
@@ -79,7 +94,7 @@ def main() -> None:
     else:
         settings = Settings(data_root=root / "input", database_path=root / "data" / "manager.db", config_path=config_path, open_browser_on_start=True)
         settings.save(config_path)
-    write_startup_log(root, f"config_loaded: {config_path}")
+    write_startup_log(root, "config_loaded")
     settings.validate()
     write_startup_log(root, "config_valid")
     instance_lock = acquire_single_instance(root)
@@ -100,7 +115,10 @@ def main() -> None:
         try:
             server.run()
         except BaseException as exc:
-            write_startup_log(root, f"server_error: {type(exc).__name__}: {exc}")
+            write_startup_log(
+                root,
+                f"server_error: {type(exc).__name__}; safe_message=Máy chủ cục bộ không thể tiếp tục.",
+            )
 
     thread = threading.Thread(target=run_server, name="hoso-manager-server", daemon=True)
     write_startup_log(root, "server_thread_starting")
@@ -118,6 +136,19 @@ def main() -> None:
         thread.join(timeout=2)
         if instance_lock is not None:
             instance_lock.close()
+
+
+def main() -> None:
+    root = executable_root()
+    try:
+        _run(root)
+    except Exception as exc:
+        write_startup_log(
+            root,
+            f"fatal_error: {type(exc).__name__}; safe_message=Không thể khởi động ứng dụng cục bộ.",
+        )
+        notify_startup_failure()
+        raise SystemExit(1) from None
 
 
 if __name__ == "__main__":

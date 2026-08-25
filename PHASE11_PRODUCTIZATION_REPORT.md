@@ -1,82 +1,88 @@
-# Phase 11 productization report
+# Phase 11C — Release closure report
 
 ## VERDICT
 
-`DIGITIZATION_MANAGER_V0_2_TECHNICAL_PASS_INSTALLER_GATE_PENDING`
+`DIGITIZATION_MANAGER_V0_2_LOCAL_PRODUCTIZATION_PASS_PR_CI_PENDING`
 
-Application, source regression, Golden, benchmark and packaged GUI runtime
-gates are green. The final product verdict remains pending because this host has
-neither `ISCC.exe` nor an approved external installation path for Inno Setup;
-the actual installer and clean-install verification have not run.
+All local mandatory productization gates are green. The final release verdict
+remains pending until the pushed PR has green CI and is merged into `main`.
 
-## BASELINE
+## SECURITY FIXES
 
-- Starting branch: `main`
-- Starting SHA: `d9938410ac0c75cabff7b83d59f9f9307bbf9e78`
-- Final branch: `feat/phase-11-productization`
-- Final SHA: `675a56504a5165c00dc9daecb1e9513ae88d2b00`
+- Localhost-only `TrustedHostMiddleware` accepts only `127.0.0.1` and
+  `localhost`.
+- State-changing backup and folder-open actions require POST plus CSRF; the
+  old state-changing `GET /backup` route is removed.
+- Scan, backup and restore mutations use a non-blocking process-local lock and
+  return a clear conflict response instead of overlapping SQLite operations.
+- Restore validates the backup, creates a safety backup, and uses SQLite's
+  backup API so Windows WAL handles are not deleted or replaced while open.
+- Startup failure logging keeps exception types and safe messages only; local
+  config paths and raw exception text are not written to `startup.log`.
+- Local fallback configuration is `config.local.json`, which is ignored by
+  Git. Installer exclusions cover runtime config, databases, logs, locks,
+  PDFs and input/output/review/backup folders.
 
-## UX
+## STARTUP
 
-- Dashboard: operational summary cards, overall progress, status bars, unit
-  table and heuristic “Cần xử lý” queue.
-- Case list: Vietnamese status labels, quick-filter chips, search, unit/warning/
-  priority filters, sorting and full-row navigation.
-- Case detail: two-column layout, status/progress header, grouped checklist,
-  direct checklist override, warnings, notes, files and recent history.
-- Settings: machine-specific data root, diagnostics, version/build identity and
-  metadata backup/restore.
-- Error states: empty data root, empty result, empty dashboard, toast errors,
-  scan loading state and restore validation messages.
-- Visual QA: synthetic fixture at 1366×768; the empty-state scan binding issue
-  was found and fixed. No real PII screenshot was created.
+- PyInstaller onedir EXE starts hidden, binds only to localhost and exposes
+  `/health` with `offline: true`.
+- Corrected-harness packaged measurements: cold-ish runs `1.4s`, `1.3s`,
+  `1.3s`; warm restart `1.3s`; all health checks passed.
+- A/B packaging comparison: UPX enabled and disabled both measured
+  `80.58 MB` bundle / `12.86 MB` EXE with no observed runtime or size gain;
+  release configuration is `upx=False` for reproducibility.
 
-## WINDOWS
+## EXE
 
-- Executable: PyInstaller onedir build completed from repository source at
-  `dist/HosoManager/HosoManager.exe`; console disabled and version metadata
-  embedded.
-- Single instance: existing Windows file lock retained and second launch gives
-  a clear local message.
-- Installer: Inno Setup script added at `installer/HosoManager.iss`, with
-  per-user install location, Start Menu/Desktop shortcuts, uninstall support and
-  exclusions for config/database/PDF data. `ISCC.exe` was not installed, so no
-  installer binary was produced.
-- Startup: launcher waits on Uvicorn's local bound-server signal before opening
-  the browser and writes append-only `startup.log` milestones. Cold-start smoke
-  reached `/health` in `59.1s`; warm restart reached it in `1.2s`.
-- The GUI bundle disables Uvicorn console logging (there is no console stream)
-  and lazy-loads `pypdf` on scan, keeping the cold-start within the bound.
-- Offline: source/runtime tests pass; no CDN or runtime external service was
-  added.
+- Build command: `build_manager.ps1`.
+- Portable bundle: `dist/HosoManager/HosoManager.exe`.
+- Final release rebuild and embedded build SHA are recorded after the source
+  commit is created.
 
-## DATA CONFIG
+## INSTALLER
 
-- Machine-specific configuration remains in local `config.json`/`config.local.json`
-  or `HOSO_DATA_ROOT`.
-- No source code hard-codes the laptop's D: data root for runtime selection.
-- The visual fixture and test databases were temporary and removed after testing.
+- Inno Setup 6.7.3 compiled `HosoManager-Setup-v0.2.0.exe` successfully.
+- Clean-install evidence in an isolated per-user test path:
+  installer exit `0`; installed `/health` and dashboard `200`; backup and
+  restore passed; config persistence passed; second instance was blocked while
+  the first remained healthy; Start Menu and Desktop shortcuts were created;
+  uninstaller exit `0`; program files were removed. User-created
+  `config.local.json` was preserved as expected and the temporary install root
+  was then removed.
+- Installer artifact checksum is refreshed after the final release rebuild.
 
-## BACKUP
+## CI
 
-- SQLite backup uses the SQLite backup API and timestamped metadata-only files.
-- Restore validates `PRAGMA integrity_check`, checks required tables, creates a
-  safety backup, then atomically replaces the metadata database.
-- Fixture coverage: backup, restore, invalid backup rejection and SQLite
-  integrity all pass.
+- Added `.github/workflows/ci.yml` for Python 3.12 compile and full pytest on
+  pushes to `main`/feature and pull requests to `main`.
+- Local command mirrors CI: `python -m compileall -q app tests` and
+  `python -m pytest tests -q`.
+- Remote CI result is pending PR creation.
 
-## VALIDATION
+## TESTS
 
-- Unit/integration/API/UI regression: `333 passed, 2 skipped, 0 failed`.
-- Golden: PASS — `18 logical documents`, `29 pages`.
-- E2E fixture routes: manager tests and new Phase 11 fixture tests pass; full
-  Playwright suite was not present in the repository.
-- 500/5,000 synthetic benchmark: first scan `11.198s`, warm scan `9.109s`,
-  unchanged warm rehashes `0`, errors `0`.
-- Offline/security: full runtime no-network, localhost/path safety and CSRF
-  tests pass.
-- Windows runtime: PyInstaller build pass; cold and warm `/health` smoke pass.
-- Installer: script present; compiler unavailable (`ISCC_NOT_FOUND`).
+- Full regression: `339 passed, 2 skipped, 0 failed`.
+- No test failure is hidden; Python 3.13 subprocess decoding and Windows WAL
+  restore regressions were fixed and rerun.
+
+## GOLDEN
+
+- `python -m app.cli test-golden --provider agent`
+- PASS: `18 logical documents / 29 pages`, `0 lỗi`.
+
+## BENCHMARK
+
+- Synthetic-only benchmark: `500 cases / 5,000 PDFs`.
+- First scan: `20.575s`; warm scan: `13.376s`.
+- First analyzed sources: `500`; unchanged warm rehashes: `0`; errors: `0`.
+
+## PUBLIC REPOSITORY AUDIT
+
+- Current tracked-content audit found no real PDFs, runtime databases, logs,
+  credentials, private keys, real corpus names or exact workstation data paths.
+- `PII_SECRET_AUDIT.md` records the re-audit as PASS. Synthetic fixture values
+  remain deterministic test data.
 
 ## DATA SAFETY
 
@@ -86,27 +92,28 @@ PDF moved: NO
 PDF deleted: NO
 PDF modified: NO
 External upload: NO
+Real corpus opened: NO
 ```
 
-## GIT
+## PR
 
-- Branch: `feat/phase-11-productization`
-- Productization commit: `675a56504a5165c00dc9daecb1e9513ae88d2b00`
-- Push: `origin/feat/phase-11-productization`
-- PR: not created
-- CI: not run
-- Merge status: unmerged
-- Release/tag status: no `v0.2.0` tag
+- PR: pending creation after the release-candidate commit is pushed.
+- Required review scope: security/runtime hardening, CI, packaging and public
+  repository audit only; no taxonomy or Golden changes.
+
+## MERGE
+
+- Merge target: `main`.
+- Merge status: pending green remote CI and review.
+
+## RELEASE
+
+- Tag target: `v0.2.0`, only after merge into `main`.
+- GitHub release and installer attachment: pending tag creation.
 
 ## KNOWN LIMITATIONS
 
-- Need Inno Setup installed to compile and test the actual installer, shortcut
-  and uninstall flow.
-- The repository has no Playwright E2E suite; synthetic browser QA covered the
-  relevant manager screens.
-
-## NEXT ACTION
-
-Install/enable Inno Setup on the Windows build host, then run
-`build_installer.ps1`, clean-install, shortcut/uninstall and final release
-checks. Do not tag `v0.2.0` before those gates are green.
+- The repository has no Playwright E2E suite; manager route and packaged
+  runtime checks use synthetic fixtures and HTTP smoke tests.
+- The release installer is unsigned by this project; Inno Setup's compiler
+  output is otherwise built and verified locally.

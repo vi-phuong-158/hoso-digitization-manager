@@ -2,8 +2,8 @@
 
 ## Source checkout
 
-- Original: `D:\\01. Công việc\\Số hóa hồ sơ Đảng viên`
-- Target: `D:\\04. Github\\hoso-digitization-manager`
+- Original: external source checkout (path intentionally omitted)
+- Target: this repository checkout
 - Method: copy only; the original checkout and its data remain in place.
 
 ## Copied

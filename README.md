@@ -5,9 +5,9 @@
 This Git repository contains source code, tests, synthetic fixtures, documentation,
 and build configuration only.
 
-- Source code: `D:\\04. Github\\hoso-digitization-manager`
+- Source code: this repository checkout
 - Real data: an external machine-specific `data_root`
-- Laptop example: `D:\\01. Công việc\\Số hóa hồ sơ Đảng viên`
+- Laptop example: `D:\\Data\\HoSoSoHoa`
 - Desktop example: the Google Drive mirror path configured locally on that machine
 
 Create ignored `config.local.json` from `config.example.json`, or set

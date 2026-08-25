@@ -6,20 +6,20 @@
 
 ## SOURCE
 
-- Original: `D:\\01. Công việc\\Số hóa hồ sơ Đảng viên`
-- Target: `D:\\04. Github\\hoso-digitization-manager`
+- Original: external source checkout (path intentionally omitted)
+- Target: this public repository checkout
 - Method: source copy only; the original checkout was not deleted, renamed, or moved.
 
 ## DATA
 
-- Data root used by laptop config: `D:\\01. Công việc\\Số hóa hồ sơ Đảng viên`
+- Data root used by laptop config: machine-local path, intentionally omitted
 - Data moved: `NO`
-- Source inventory at validation: 24 PDFs across 10 top-level input folders.
+- Source inventory counts are intentionally omitted from public documentation.
 - Target does not contain the real corpus, source PDF bytes, runtime logs, or production DB.
 
 ## GIT
 
-- Repository root: `D:\\04. Github\\hoso-digitization-manager`
+- Repository root: this repository checkout
 - Branch: `main`
 - First baseline commit: `227e47c227d6e9f3d6884a919286b192a4e8ca9c`
 - Final validated migration SHA: `89979df7430c5314ef6a2a8061a308656dbc8155`
@@ -28,7 +28,7 @@
 ## GITHUB
 
 - Repository: `vi-phuong-158/hoso-digitization-manager`
-- Visibility: `PRIVATE`
+- Visibility: `PUBLIC`
 - Remote: `https://github.com/vi-phuong-158/hoso-digitization-manager`
 - Push status: `SUCCESS` (`main` pushed; tag pushed after final validation)
 
@@ -57,18 +57,17 @@ simultaneously from two machines.
   trees were intentionally excluded from Git.
 - Golden CLI: PASS — 1 file, 18 logical documents, 29 pages, 0 errors.
 - Compile: `python -m compileall -q app tests` PASS.
-- Real-data smoke: PASS — health 200/OK, scan 200/SUCCESS, 16 folders, 259
-  files, 16 cases, 259 documents, 0 scanner errors; dashboard/cases/detail/
-  settings/scan-runs/backup returned successfully; source snapshot unchanged.
-- Windows package: PASS — PyInstaller 6.22.2 rebuilt onedir executable; packaged
-  `/health` returned offline OK, dashboard returned 200, and settings showed the
-  configured D: data root.
+- Real-data smoke: completed before public sanitization; operational counts and
+  machine-specific paths are intentionally omitted here. Source snapshot was
+  unchanged.
+- Windows package: PASS — PyInstaller onedir executable rebuilt; packaged
+  `/health` returned offline OK and dashboard returned 200.
 - Runtime: offline path retained; no network/API dependency was introduced.
 
 ## CONFIG
 
 - Source run: create ignored `config.local.json` from `config.example.json`.
-- Laptop: set `data_root` to the D: data checkout.
+- Laptop: set `data_root` to the operator's local data checkout.
 - Desktop: set `data_root` to that machine's Google Drive mirror path.
 - `HOSO_DATA_ROOT` can override the JSON `data_root` without source changes.
 - `config.json` beside the executable is used for packaged runs; source runs

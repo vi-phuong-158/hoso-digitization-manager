@@ -1,9 +1,6 @@
 from __future__ import annotations
 
 import sqlite3
-import os
-import shutil
-import tempfile
 from contextlib import contextmanager
 from pathlib import Path
 from typing import Any, Iterator
@@ -183,14 +180,12 @@ class Database:
             raise ValueError(str(check.get("reason", "Backup không hợp lệ")))
         safety_path = self.backup_to(safety_backup)
         self.path.parent.mkdir(parents=True, exist_ok=True)
-        with tempfile.NamedTemporaryFile(prefix="manager-restore-", suffix=".sqlite", dir=self.path.parent, delete=False) as handle:
-            temp_path = Path(handle.name)
-        try:
-            shutil.copy2(source_path, temp_path)
-            os.replace(temp_path, self.path)
-        except Exception:
-            temp_path.unlink(missing_ok=True)
-            raise
+        # Use SQLite's backup API instead of replacing the live file. Windows
+        # can keep the WAL handle open briefly, which makes sidecar deletion or
+        # os.replace() fail even though all application connections are closed.
+        with sqlite3.connect(source_path) as source, sqlite3.connect(self.path) as destination:
+            source.backup(destination)
+            destination.commit()
         return safety_path
 
 

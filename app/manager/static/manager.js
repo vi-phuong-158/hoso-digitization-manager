@@ -19,6 +19,19 @@
   };
   window.managerPost = post;
   window.managerToast = toast;
+  document.querySelectorAll("[data-open-folder]").forEach((button) => {
+    button.addEventListener("click", async () => {
+      button.disabled = true;
+      try {
+        await post(button.dataset.url);
+        toast("Đã mở thư mục hồ sơ.", "success");
+      } catch (error) {
+        toast(error.message, "error");
+      } finally {
+        button.disabled = false;
+      }
+    });
+  });
   document.querySelectorAll("[data-scan-all]").forEach((scanButton) => scanButton.addEventListener("click", async (event) => {
     const button = event.currentTarget;
     button.disabled = true;

@@ -161,30 +161,33 @@ def _git_integrity(root: Path) -> dict:
     try:
         top = subprocess.run(
             ["git", "-C", str(root), "rev-parse", "--show-toplevel"],
-            capture_output=True, text=True, check=False,
+            capture_output=True, text=True, encoding="utf-8", errors="replace", check=False,
         )
         head = subprocess.run(
             ["git", "-C", str(root), "rev-parse", "HEAD"],
-            capture_output=True, text=True, check=False,
+            capture_output=True, text=True, encoding="utf-8", errors="replace", check=False,
         )
         status = subprocess.run(
             ["git", "-C", str(root), "status", "--porcelain"],
-            capture_output=True, text=True, check=False,
+            capture_output=True, text=True, encoding="utf-8", errors="replace", check=False,
         )
     except OSError:
         return {"status": "UNAVAILABLE", "head": None}
-    if top.returncode != 0 or head.returncode != 0 or status.returncode != 0:
+    top_output = (top.stdout or "").strip()
+    head_output = (head.stdout or "").strip()
+    status_output = (status.stdout or "").strip()
+    if top.returncode != 0 or head.returncode != 0 or status.returncode != 0 or not top_output or not head_output:
         return {"status": "UNAVAILABLE", "head": None}
     try:
-        if Path(top.stdout.strip()).resolve() != Path(root).resolve():
+        if Path(top_output).resolve() != Path(root).resolve():
             # A synthetic workspace can live underneath the repository but is
             # not itself a baseline checkout.
             return {"status": "UNAVAILABLE", "head": None}
     except OSError:
         return {"status": "UNAVAILABLE", "head": None}
     return {
-        "status": "CLEAN" if not status.stdout.strip() else "DIRTY",
-        "head": head.stdout.strip(),
+        "status": "CLEAN" if not status_output else "DIRTY",
+        "head": head_output,
     }
 
 

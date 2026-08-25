@@ -4,7 +4,7 @@
 
 - Read the workspace and nested project instructions before editing.
 - Confirmed the source checkout contains both application code and real runtime/data trees.
-- Created `D:\\04. Github\\hoso-digitization-manager` as a separate target.
+- Created a separate source-only target checkout.
 - Copied source, tests, synthetic fixtures, safe docs, taxonomy, requirements and packaging files.
 - Excluded real corpus, runtime databases, logs, caches, build output and old Git metadata.
 - Removed copied pilot reports that contained real source filenames/hashes; original files were untouched.
@@ -16,7 +16,7 @@
 - Real-data smoke: SUCCESS against external D: root using a temporary DB; source snapshot unchanged.
 - Rebuilt and launched the Windows onedir package; health/dashboard PASS and D: data root confirmed.
 - Initialized local Git on `main`; baseline commit is `227e47c227d6e9f3d6884a919286b192a4e8ca9c`.
-- GitHub private repository confirmed and main pushed successfully.
+- GitHub repository confirmed and main pushed successfully.
 - `MIGRATION_REPORT.md` records the final migration verdict, safety gates and limitations.
 
 Validation and Git/GitHub results are appended after each gate is run.
@@ -47,3 +47,28 @@ Validation and Git/GitHub results are appended after each gate is run.
 - Synthetic scale benchmark: `500 cases / 5,000 PDFs`; first scan `11.198s`, warm scan `9.109s`, unchanged warm rehashes `0`.
 - `ISCC.exe` remains unavailable. The official Inno Setup installation attempt was rejected at the external system-install approval gate; installer build, clean install, shortcut and uninstall gates remain pending.
 - Productization commit `675a56504a5165c00dc9daecb1e9513ae88d2b00` was pushed to `origin/feat/phase-11-productization`; no PR, merge or release tag was created while the mandatory installer gate is red.
+
+## 2026-08-25 — Phase 11C release closure
+
+- Re-audited tracked public content and removed stale workstation paths,
+  private-repository wording and real inventory details from public docs.
+- Hardened local runtime boundaries: TrustedHost localhost allow-list, POST +
+  CSRF for state-changing routes, mutation lock, safe startup logging and
+  ignored local config fallback.
+- Fixed Windows SQLite restore to use the SQLite backup API rather than
+  deleting/replacing a live WAL sidecar; hardened Git-integrity subprocess
+  decoding for Python 3.13.
+- Added explicit test package paths and CI workflow. Full regression:
+  `339 passed, 2 skipped, 0 failed`; Golden: `18 logical documents / 29 pages`,
+  PASS.
+- Synthetic benchmark: `500 cases / 5,000 PDFs`; first `20.575s`, warm
+  `13.376s`, unchanged warm rehashes `0`, errors `0`.
+- Packaged EXE A/B: UPX on/off both `80.58 MB` bundle and `12.86 MB` EXE;
+  release choice is `upx=False`. Corrected-harness cold-ish startup was
+  `1.4s`, `1.3s`, `1.3s`; warm `1.3s`.
+- Installed official Inno Setup 6.7.3 after Authenticode and release-hash
+  verification. Installer compiled successfully; clean-install runtime,
+  backup/restore, persistence, shortcuts, single-instance and uninstall gates
+  passed using synthetic temporary data.
+- PR, merge, tag and GitHub release remain pending until the release-candidate
+  commit is pushed and remote CI is green.

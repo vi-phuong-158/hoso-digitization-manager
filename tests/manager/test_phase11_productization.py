@@ -17,7 +17,7 @@ def client_for(tmp_path: Path) -> TestClient:
     folder.mkdir(parents=True)
     make_pdf(folder / "01.Ly_lich_nguoi_xin_vao_dang.pdf")
     settings = Settings(data_root=root, database_path=tmp_path / "data" / "manager.db", config_path=tmp_path / "config.json")
-    return TestClient(create_app(settings))
+    return TestClient(create_app(settings), base_url="http://127.0.0.1")
 
 
 def csrf(client: TestClient) -> str:

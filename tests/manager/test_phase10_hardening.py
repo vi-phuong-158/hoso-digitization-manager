@@ -17,7 +17,7 @@ from tests.manager.test_scanner import make_pdf
 
 def _client(root: Path, database: Path, manifest: Path | None = None) -> TestClient:
     settings = Settings(data_root=root, database_path=database, manifest_path=manifest)
-    return TestClient(create_app(settings))
+    return TestClient(create_app(settings), base_url="http://127.0.0.1")
 
 
 def _scan(client: TestClient) -> int:

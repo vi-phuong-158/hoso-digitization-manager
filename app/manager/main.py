@@ -7,6 +7,7 @@ from fastapi import FastAPI, Request
 from fastapi.responses import HTMLResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
+from starlette.middleware.trustedhost import TrustedHostMiddleware
 
 from .config import Settings
 from .db import Database
@@ -23,6 +24,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     db = Database(cfg.database_path)
     db.initialize()
     app = FastAPI(title=APP_NAME, docs_url=None, redoc_url=None)
+    app.add_middleware(TrustedHostMiddleware, allowed_hosts=["127.0.0.1", "localhost"])
     app.state.settings = cfg
     app.state.db = db
     app.mount("/static", StaticFiles(directory=PACKAGE_DIR / "static"), name="static")

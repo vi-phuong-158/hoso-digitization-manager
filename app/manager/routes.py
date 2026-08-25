@@ -13,6 +13,7 @@ from fastapi.templating import Jinja2Templates
 from .config import Settings
 from .db import Database
 from .integration import ensure_schema, integrate_case, provider_for
+from .mutation import MutationBusy, MutationLock
 from .scanner import ScanService
 from .status import mark_complete, now as status_now, recompute_case, reopen, set_checklist_override, set_manual_status, update_note
 from .taxonomy import TaxonomyAdapter
@@ -124,6 +125,7 @@ def register_routes(app, cfg: Settings, db: Database, templates: Jinja2Templates
     scanner = ScanService(cfg, db, taxonomy)
     ensure_schema(db)
     integration_provider = provider_for(cfg, taxonomy)
+    mutation_lock = MutationLock()
 
     @app.get("/cases")
     def cases(request: Request, q: str = "", status: str = "", unit: str = "", warning: int = 0, missing_p1: int = 0, page: int = 1, sort: str = "updated"):
@@ -228,47 +230,56 @@ def register_routes(app, cfg: Settings, db: Database, templates: Jinja2Templates
     async def scan_all(request: Request):
         if not _csrf_valid(request):
             return JSONResponse({"detail": "CSRF token không hợp lệ"}, status_code=403)
-        result = scanner.scan()
-        _integrate_all(db, integration_provider)
-        _recompute_all(db)
-        return result.as_dict()
+        try:
+            with mutation_lock.acquire():
+                result = scanner.scan()
+                _integrate_all(db, integration_provider)
+                _recompute_all(db)
+                return result.as_dict()
+        except MutationBusy as exc:
+            return JSONResponse({"detail": str(exc)}, status_code=409)
 
     @app.post("/scan/{case_id}")
     async def scan_one(request: Request, case_id: int):
         if not _csrf_valid(request):
             return JSONResponse({"detail": "CSRF token không hợp lệ"}, status_code=403)
-        result = scanner.scan(case_id)
-        _integrate_all(db, integration_provider, case_id)
-        _recompute_all(db, case_id)
-        return result.as_dict()
+        try:
+            with mutation_lock.acquire():
+                result = scanner.scan(case_id)
+                _integrate_all(db, integration_provider, case_id)
+                _recompute_all(db, case_id)
+                return result.as_dict()
+        except MutationBusy as exc:
+            return JSONResponse({"detail": str(exc)}, status_code=409)
 
-    def _backup_dir() -> Path:
+    def _backup_dir(create: bool = True) -> Path:
         path = cfg.database_path.parent / "backups"
-        path.mkdir(parents=True, exist_ok=True)
+        if create:
+            path.mkdir(parents=True, exist_ok=True)
         return path
 
     def _backup_list() -> list[dict]:
         items = []
-        for path in sorted(_backup_dir().glob("manager-*.sqlite"), key=lambda item: item.stat().st_mtime, reverse=True):
+        backup_dir = _backup_dir(create=False)
+        if not backup_dir.is_dir():
+            return items
+        for path in sorted(backup_dir.glob("manager-*.sqlite"), key=lambda item: item.stat().st_mtime, reverse=True):
             check = db.integrity_check(path)
             items.append({"name": path.name, "path": str(path), "size_bytes": path.stat().st_size, "valid": check.get("ok", False)})
         return items
-
-    @app.get("/backup")
-    def backup_metadata():
-        stamp = datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S")
-        target = _backup_dir() / f"manager-{stamp}.sqlite"
-        db.backup_to(target)
-        return {"ok": True, "path": str(target), "metadata_only": True, "integrity": db.integrity_check(target)}
 
     @app.post("/backup")
     async def create_backup(request: Request):
         if not _csrf_valid(request):
             return JSONResponse({"detail": "CSRF token không hợp lệ"}, status_code=403)
-        stamp = datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S")
-        target = _backup_dir() / f"manager-{stamp}.sqlite"
-        db.backup_to(target)
-        return {"ok": True, "path": str(target), "metadata_only": True, "integrity": db.integrity_check(target)}
+        try:
+            with mutation_lock.acquire():
+                stamp = datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S-%f")
+                target = _backup_dir() / f"manager-{stamp}.sqlite"
+                db.backup_to(target)
+                return {"ok": True, "path": str(target), "metadata_only": True, "integrity": db.integrity_check(target)}
+        except MutationBusy as exc:
+            return JSONResponse({"detail": str(exc)}, status_code=409)
 
     @app.get("/backups")
     def backups():
@@ -280,13 +291,17 @@ def register_routes(app, cfg: Settings, db: Database, templates: Jinja2Templates
             return JSONResponse({"detail": "CSRF token không hợp lệ"}, status_code=403)
         payload = await _payload(request)
         name = Path(payload.get("name", "")).name
-        source = _backup_dir() / name
-        if source.parent != _backup_dir() or source.suffix.lower() != ".sqlite" or not source.is_file():
+        backup_dir = _backup_dir(create=True)
+        source = backup_dir / name
+        if source.parent != backup_dir or source.suffix.lower() != ".sqlite" or not source.is_file():
             return JSONResponse({"detail": "Backup không hợp lệ hoặc không nằm trong thư mục backup của ứng dụng."}, status_code=400)
         stamp = datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S")
-        safety = _backup_dir() / f"manager-before-restore-{stamp}.sqlite"
+        safety = backup_dir / f"manager-before-restore-{stamp}.sqlite"
         try:
-            safety_path = db.restore_from(source, safety)
+            with mutation_lock.acquire():
+                safety_path = db.restore_from(source, safety)
+        except MutationBusy as exc:
+            return JSONResponse({"detail": str(exc)}, status_code=409)
         except (OSError, ValueError) as exc:
             return JSONResponse({"detail": str(exc)}, status_code=400)
         return {"ok": True, "restored": source.name, "safety_backup": str(safety_path), "integrity": db.integrity_check()}
@@ -298,8 +313,10 @@ def register_routes(app, cfg: Settings, db: Database, templates: Jinja2Templates
             return {"items": items}
         return templates.TemplateResponse(request=request, name="scan_runs.html", context={"items": items})
 
-    @app.get("/open/case/{case_id}")
-    def open_case(case_id: int):
+    @app.post("/open/case/{case_id}")
+    async def open_case(request: Request, case_id: int):
+        if not _csrf_valid(request):
+            return JSONResponse({"detail": "CSRF token không hợp lệ"}, status_code=403)
         row = db.one("SELECT folder_path FROM cases WHERE id=?", (case_id,))
         if row is None:
             return JSONResponse({"detail": "Không tìm thấy hồ sơ"}, status_code=404)

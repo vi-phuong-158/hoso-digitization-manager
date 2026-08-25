@@ -80,7 +80,7 @@ class Settings:
     def save(self, path: str | Path | None = None) -> Path:
         target = Path(path) if path else self.config_path
         if target is None:
-            target = REPO_ROOT / "manager-config.json"
+            target = REPO_ROOT / "config.local.json"
         target.parent.mkdir(parents=True, exist_ok=True)
         target.write_text(json.dumps(self.as_dict(), ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
         self.config_path = target
