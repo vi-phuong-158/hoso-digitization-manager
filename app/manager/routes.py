@@ -363,9 +363,10 @@ def _safe_path(root: Path, path: Path) -> Path | None:
 
 
 def _open_local(path: Path) -> None:
-    if os.name == "nt":
+    launcher = getattr(os, "startfile", None)
+    if launcher is not None:
         try:
-            os.startfile(str(path))  # type: ignore[attr-defined]
+            launcher(str(path))
         except OSError:
             pass
 

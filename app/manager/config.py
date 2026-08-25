@@ -39,7 +39,8 @@ class Settings:
             if not value:
                 return default
             candidate = Path(value)
-            return candidate if candidate.is_absolute() else (base / candidate).resolve()
+            windows_drive_path = len(value) >= 3 and value[1] == ":" and value[2] in "\\/"
+            return candidate.resolve() if candidate.is_absolute() or windows_drive_path else (base / candidate).resolve()
 
         integration = raw.get("integration") or {}
         data_root_value = os.environ.get("HOSO_DATA_ROOT") or raw.get("data_root")
