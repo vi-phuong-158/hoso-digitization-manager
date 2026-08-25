@@ -9,3 +9,6 @@ fastapi>=0.115
 jinja2>=3.1
 uvicorn>=0.30
 pyinstaller>=6.0
+
+# FastAPI/Starlette TestClient dependency for Manager integration/E2E tests
+httpx2>=0.1

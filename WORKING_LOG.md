@@ -11,5 +11,12 @@
 - Added machine-specific configuration support: ignored `config.local.json` and `HOSO_DATA_ROOT`.
 - Added `MIGRATION_INVENTORY.md` and `PII_SECRET_AUDIT.md`.
 - Anonymized the checked-in Golden fixture label to `Synthetic Person`; Golden tests remain isolated and synthetic.
+- Added `httpx2` test dependency required by the installed Starlette TestClient.
+- Full validation: 330 passed, 2 skipped; Golden CLI PASS; compileall PASS.
+- Real-data smoke: SUCCESS against external D: root using a temporary DB; source snapshot unchanged.
+- Rebuilt and launched the Windows onedir package; health/dashboard PASS and D: data root confirmed.
+- Initialized local Git on `main`; baseline commit is `227e47c227d6e9f3d6884a919286b192a4e8ca9c`.
+- GitHub private repository confirmed and main pushed successfully.
+- `MIGRATION_REPORT.md` records the final migration verdict, safety gates and limitations.
 
 Validation and Git/GitHub results are appended after each gate is run.

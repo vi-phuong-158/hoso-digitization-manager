@@ -555,7 +555,11 @@ def test_khong_fake_ngay_khi_chi_co_thang(env):
 # Nhóm 5 — Regression: baseline/blind/golden không suy suyển
 # ===========================================================================
 def test_golden_van_pass_provider_agent(golden_root: Path):
-    reports = run_all_golden(golden_root, provider_name="agent")
+    reports = run_all_golden(
+        golden_root,
+        provider_name="agent",
+        provider_config={"analysis_root": str(golden_root / "analysis")},
+    )
     assert reports
     assert all(r.passed for r in reports), [str(r) for r in reports if not r.passed]
 

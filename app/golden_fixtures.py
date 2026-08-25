@@ -174,19 +174,46 @@ def _stage_agent_analysis(
                 "source_file": source_file,
                 "page_count": case["source_pages"],
                 "pages": page_signals.get("pages") or [],
-                "documents": [
-                    {
-                        "source_pages": doc["pages"],
-                        "type_id": doc["type_id"],
-                        "confidence": 0.97,
-                        "document_date": doc.get("document_date"),
-                        "date_confidence": 0.97 if doc.get("document_date") else 0.0,
-                        "title_short": doc.get("title_short"),
-                        "needs_review": bool(doc.get("expected_review", False)),
-                        "review_reason": "golden fixture expected review" if doc.get("expected_review") else None,
-                    }
-                    for doc in expected_docs
-                ],
+                "documents": [_synthetic_document_analysis(doc, page_signals) for doc in expected_docs],
             }
             target = target_dir / (Path(source_file).stem + ".json")
             target.write_text(json.dumps(analysis, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+
+
+def _synthetic_document_analysis(doc: dict, page_signals: dict) -> dict:
+    """Create a self-contained Agent result without copying production analysis.
+
+    Confidence is derived from the checked-in page candidates so the synthetic
+    runtime exercises the same REVIEW threshold as the page-signal fixture. Two
+    otherwise undated synthetic certificates receive stable fixture-only dates;
+    this keeps the ordering rehearsal deterministic without asserting a date for
+    the real corpus.
+    """
+    pages = list(doc["pages"])
+    observations = {int(p["page_number"]): p for p in page_signals.get("pages") or []}
+    candidates = []
+    dates = []
+    for page in pages:
+        observation = observations.get(page) or {}
+        candidates.extend(observation.get("type_candidates") or [])
+        if observation.get("document_date"):
+            dates.append((observation["document_date"], observation.get("date_confidence") or 0.0))
+    type_id = doc["type_id"]
+    matching = [float(c.get("confidence", 0.0)) for c in candidates if c.get("type_id") == type_id]
+    confidence = max(matching, default=0.97)
+    document_date = doc.get("document_date")
+    date_confidence = max((float(conf) for _, conf in dates), default=0.0)
+    if document_date is None and type_id == "86":
+        synthetic_dates = {1: "2014-02-01", 5: "2016-03-01"}
+        document_date = synthetic_dates.get(pages[0])
+        date_confidence = 0.9 if document_date else 0.0
+    return {
+        "source_pages": pages,
+        "type_id": type_id,
+        "confidence": confidence,
+        "document_date": document_date,
+        "date_confidence": date_confidence,
+        "title_short": doc.get("title_short"),
+        "needs_review": bool(doc.get("expected_review", False)),
+        "review_reason": "golden fixture expected review" if doc.get("expected_review") else None,
+    }
