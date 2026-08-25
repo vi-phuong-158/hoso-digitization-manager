@@ -14,7 +14,7 @@ the actual installer and clean-install verification have not run.
 - Starting branch: `main`
 - Starting SHA: `d9938410ac0c75cabff7b83d59f9f9307bbf9e78`
 - Final branch: `feat/phase-11-productization`
-- Final SHA: pending commit; changes are currently uncommitted
+- Final SHA: `675a56504a5165c00dc9daecb1e9513ae88d2b00`
 
 ## UX
 
@@ -91,7 +91,8 @@ External upload: NO
 ## GIT
 
 - Branch: `feat/phase-11-productization`
-- Commits: no new commit created in this session
+- Productization commit: `675a56504a5165c00dc9daecb1e9513ae88d2b00`
+- Push: `origin/feat/phase-11-productization`
 - PR: not created
 - CI: not run
 - Merge status: unmerged
