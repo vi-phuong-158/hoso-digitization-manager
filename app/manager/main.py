@@ -8,6 +8,8 @@ from fastapi.responses import HTMLResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 
+from app.release import health_release_fields
+
 from .config import Settings
 from .db import Database
 from .routes import dashboard_context, register_routes
@@ -36,7 +38,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
     @app.get("/health")
     def health() -> dict:
-        return {"status": "ok", "service": "hoso-digitization-manager", "offline": True}
+        return {"status": "ok", "service": "hoso-digitization-manager", "offline": True, **health_release_fields()}
 
     @app.get("/", response_class=HTMLResponse)
     def dashboard(request: Request):
