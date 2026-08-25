@@ -4,4 +4,6 @@ Xem AGENTS.md để biết hợp đồng vận hành. Module trong package này 
 hard-code provider/model; mọi lời gọi model đi qua app.vision_adapter.
 """
 
-__version__ = "0.1.0"
+from .release import APP_VERSION
+
+__version__ = APP_VERSION
