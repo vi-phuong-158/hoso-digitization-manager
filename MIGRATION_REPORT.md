@@ -22,7 +22,7 @@
 - Repository root: `D:\\04. Github\\hoso-digitization-manager`
 - Branch: `main`
 - First baseline commit: `227e47c227d6e9f3d6884a919286b192a4e8ca9c`
-- Final SHA: `FINAL_SHA_AFTER_AMEND`
+- Final validated migration SHA: `89979df7430c5314ef6a2a8061a308656dbc8155`
 - Tag: `v0.1.0-pilot`
 
 ## GITHUB
