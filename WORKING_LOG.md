@@ -72,3 +72,13 @@ Validation and Git/GitHub results are appended after each gate is run.
   passed using synthetic temporary data.
 - PR, merge, tag and GitHub release remain pending until the release-candidate
   commit is pushed and remote CI is green.
+
+## 2026-08-25 — Phase 11C published release
+
+- PR #1 passed both push and pull-request CI workflows and merged into `main`.
+- Merged main SHA and tag target: `604b81d3f5b328078778abbcf80229172d5fb5dd`;
+  annotated tag `v0.2.0` pushed successfully.
+- Rebuilt the portable EXE and Inno Setup installer from tagged main, verified
+  final packaged `/health` as `ok`, `offline=true`, with matching build SHA.
+- GitHub release published with the final installer asset; productization
+  verdict is `DIGITIZATION_MANAGER_V0_2_PRODUCTIZATION_PASS`.

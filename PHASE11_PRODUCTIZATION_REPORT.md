@@ -2,10 +2,10 @@
 
 ## VERDICT
 
-`DIGITIZATION_MANAGER_V0_2_LOCAL_PRODUCTIZATION_PASS_PR_CI_PENDING`
+`DIGITIZATION_MANAGER_V0_2_PRODUCTIZATION_PASS`
 
-All local mandatory productization gates are green. The final release verdict
-remains pending until the pushed PR has green CI and is merged into `main`.
+All mandatory local and remote release gates are green. The productization
+changes are merged into `main` and published as `v0.2.0`.
 
 ## SECURITY FIXES
 
@@ -37,8 +37,8 @@ remains pending until the pushed PR has green CI and is merged into `main`.
 
 - Build command: `build_manager.ps1`.
 - Portable bundle: `dist/HosoManager/HosoManager.exe`.
-- Release-candidate source commit: `089ba0f85b7dc763bd2999ed1824e2b926f73ba9`.
-- Final EXE SHA-256: `bf42078ada9b0f3dcb35c03e6410ce45ee03273b9d8fb8b4b072b8023a276368`.
+- Tagged-main source commit: `604b81d3f5b328078778abbcf80229172d5fb5dd`.
+- Final EXE SHA-256: `994bb64ef1c63b6517dbe8f30f5b395e7ecd632849ee94a174b67809205f6691`.
 
 ## INSTALLER
 
@@ -51,8 +51,8 @@ remains pending until the pushed PR has green CI and is merged into `main`.
   `config.local.json` was preserved as expected and the temporary install root
   was then removed.
 - Installer artifact checksum is refreshed after the final release rebuild.
-- Final installer size: `30.65 MB`; SHA-256:
-  `e5cbd43191c379d88deb8a2006949cb5add39728aba9b372a3db532df9361e5a`.
+- Final installer size: `30.64 MB`; SHA-256:
+  `5f72f0644aeda605c8e4026cf70fdf45fc5cafe0b813d2b8c76ba1e60e21305c`.
 
 ## CI
 
@@ -60,7 +60,7 @@ remains pending until the pushed PR has green CI and is merged into `main`.
   pushes to `main`/feature and pull requests to `main`.
 - Local command mirrors CI: `python -m compileall -q app tests` and
   `python -m pytest tests -q`.
-- Remote CI result is pending PR creation.
+- Remote CI: PASS on both push and pull-request workflows.
 
 ## TESTS
 
@@ -99,7 +99,8 @@ Real corpus opened: NO
 
 ## PR
 
-- PR: pending creation after the release-candidate commit is pushed.
+- PR: [#1](https://github.com/vi-phuong-158/hoso-digitization-manager/pull/1),
+  merged.
 - Required review scope: security/runtime hardening, CI, packaging and public
   repository audit only; no taxonomy or Golden changes.
 
@@ -111,12 +112,14 @@ Real corpus opened: NO
 ## MERGE
 
 - Merge target: `main`.
-- Merge status: pending green remote CI and review.
+- Merge status: merged into `main` at
+  `604b81d3f5b328078778abbcf80229172d5fb5dd`.
 
 ## RELEASE
 
-- Tag target: `v0.2.0`, only after merge into `main`.
-- GitHub release and installer attachment: pending tag creation.
+- Tag: `v0.2.0` on the merged main commit.
+- GitHub release: https://github.com/vi-phuong-158/hoso-digitization-manager/releases/tag/v0.2.0
+- Installer attachment was rebuilt from tagged `main` and uploaded.
 
 ## KNOWN LIMITATIONS
 
