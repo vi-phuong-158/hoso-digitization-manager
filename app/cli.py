@@ -35,6 +35,7 @@ from .golden import run_all_golden_isolated
 from .incremental import DECISION_RETIRED_SOURCE, scan_person_folder
 from .models import MODE_APPLY, MODE_DRY_RUN, PipelineError
 from .pdf_inventory import PersonInventory, build_inventory, list_pdfs, read_source, sha256_file
+from .pilot import PilotRunner
 from .pipeline import PipelineResult, Workspace, process_person_folder
 from .reconcile import reconcile
 from .review import list_pending_reviews, resolve_review
@@ -403,6 +404,28 @@ def cmd_providers(args: argparse.Namespace) -> int:
     return EXIT_OK
 
 
+def cmd_pilot(args: argparse.Namespace) -> int:
+    """Thực thi chu trình pilot tiêu chuẩn với đầy đủ đo lường và kiểm chứng."""
+    ws = _workspace(args)
+    runner = PilotRunner(
+        Path(args.folder),
+        workspace=ws,
+        provider_name=args.provider,
+        provider_config=_provider_config(args),
+        run_id=args.run_id,
+    )
+    report = runner.run_full()
+    if args.json:
+        print(json.dumps(report.as_dict(), ensure_ascii=False, indent=2, sort_keys=True))
+    else:
+        print(report.summary_text())
+    if report.status == "PASS":
+        return EXIT_OK
+    elif report.status == "REVIEW_REQUIRED":
+        return EXIT_REVIEW
+    return EXIT_BLOCKED
+
+
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(prog="app.cli", description="Pipeline số hóa hồ sơ đảng viên")
     p.add_argument("--root", default=None, help="Thư mục gốc repo (mặc định: tự dò)")
@@ -540,6 +563,13 @@ def build_parser() -> argparse.ArgumentParser:
     sp = sub.add_parser("test-golden", help="Chạy golden acceptance")
     add_provider_args(sp, default_provider="fixture")
     sp.set_defaults(func=cmd_test_golden)
+
+    sp = sub.add_parser("pilot", help="Thực thi chu trình pilot có thể đo lường và kiểm chứng")
+    sp.add_argument("folder", help="input/<TEN_NGUOI>")
+    sp.add_argument("--run-id", default=None, help="Tùy chọn run_id truy vết")
+    sp.add_argument("--json", action="store_true", help="In manifest JSON của pilot run")
+    add_provider_args(sp, default_provider="agent")
+    sp.set_defaults(func=cmd_pilot)
 
     sp = sub.add_parser("providers", help="Liệt kê provider/catalog")
     sp.set_defaults(func=cmd_providers)
