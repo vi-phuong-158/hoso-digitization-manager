@@ -14,6 +14,7 @@ ngày không còn bị chặn REVIEW nữa mà được xếp bằng tie-break d
 from __future__ import annotations
 
 import uuid
+import os
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional, Sequence
@@ -264,7 +265,10 @@ def execute_rename_plan(
             tmp = tmp_dir / f"{uuid.uuid4().hex}.pdf"
             src.rename(tmp)
             tmp_of[op.logical_document_id] = tmp
-            undo_stack.append(lambda t=tmp, s=src: t.rename(s))
+            # Recovery deliberately uses ``os.replace`` rather than the
+            # ordinary rename path.  A failure while finalizing a move must
+            # still be able to return staged bytes to their canonical name.
+            undo_stack.append(lambda t=tmp, s=src: os.replace(t, s))
 
         # Pha 2a: từ tên tạm -> tên đích cuối cùng.
         for op in moves:
@@ -272,7 +276,7 @@ def execute_rename_plan(
             dest.parent.mkdir(parents=True, exist_ok=True)
             tmp = tmp_of[op.logical_document_id]
             tmp.rename(dest)
-            undo_stack.append(lambda d=dest, t=tmp: d.rename(t))
+            undo_stack.append(lambda d=dest, t=tmp: os.replace(d, t))
 
         # Pha 2b: tài liệu hoàn toàn mới - tách trang trực tiếp ra tên đích.
         for op in creates:

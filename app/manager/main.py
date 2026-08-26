@@ -73,7 +73,7 @@ def _csrf_valid(request: Request) -> bool:
     return bool(expected and supplied and secrets.compare_digest(expected, supplied))
 
 
-async def _payload(request: Request) -> dict[str, str]:
+async def _payload(request: Request) -> dict:
     raw = await request.body()
     if not raw:
         return {}
@@ -81,7 +81,9 @@ async def _payload(request: Request) -> dict[str, str]:
         import json
 
         value = json.loads(raw.decode("utf-8"))
-        return {str(k): str(v) for k, v in value.items()}
+        if not isinstance(value, dict):
+            raise ValueError("JSON body phải là object")
+        return {str(k): v for k, v in value.items()}
     # Deliberately local form decoding: the existing runtime has a source
     # guard against importing network-related modules such as urllib.
     def decode(value: str) -> str:

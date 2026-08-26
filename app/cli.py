@@ -38,6 +38,11 @@ from .pdf_inventory import PersonInventory, build_inventory, list_pdfs, read_sou
 from .pipeline import PipelineResult, Workspace, process_person_folder
 from .reconcile import reconcile
 from .review import list_pending_reviews, resolve_review
+from .review_repair import (
+    apply_repair, benchmark_fixture, create_repair_plan, decide_finding,
+    export_corrections_jsonl, get_repair_plan, list_findings, revision_diff,
+    review_history, run_semantic_review, start_review,
+)
 from .state import SOURCE_ACTIVE, SOURCE_MISSING, SOURCE_RETIRED, StateRegistry
 from .state_import import import_person_folder, recover_legacy_person_folder
 from .vision_adapter import available_providers
@@ -290,6 +295,150 @@ def cmd_reconcile(args: argparse.Namespace) -> int:
     return EXIT_OK if report.ok else EXIT_BLOCKED
 
 
+def _review_pages(value: Optional[str]) -> Optional[tuple[int, int]]:
+    if not value:
+        return None
+    try:
+        start, end = (int(part) for part in value.split("-", 1))
+    except Exception as exc:
+        raise PipelineError("--pages phải có dạng 18-24.") from exc
+    if start < 1 or end < start:
+        raise PipelineError("--pages phải là phạm vi tăng dần, bắt đầu từ 1.")
+    return start, end
+
+
+def _manual_payload(args: argparse.Namespace) -> dict:
+    raw = args.payload_file and Path(args.payload_file).read_text(encoding="utf-8") or args.payload
+    if not raw:
+        raise PipelineError("MANUAL_FIX cần --payload JSON hoặc --payload-file.")
+    try:
+        value = json.loads(raw)
+    except json.JSONDecodeError as exc:
+        raise PipelineError("MANUAL_FIX payload phải là JSON hợp lệ.") from exc
+    if not isinstance(value, dict):
+        raise PipelineError("MANUAL_FIX payload phải là một JSON object.")
+    return value
+
+
+def cmd_review_case(args: argparse.Namespace) -> int:
+    ws, folder, catalog = _workspace(args), Path(args.folder), load_catalog()
+    person = folder.name
+    with StateRegistry(ws.state_db_path) as registry:
+        session, findings = start_review(
+            registry, person, catalog=catalog, output_dir=ws.output / person, review_dir=ws.review / person,
+            source_hash=args.source_hash, pages=_review_pages(args.pages), review_method="deterministic",
+        )
+    payload = {"session": session.__dict__, "findings": [f.__dict__ for f in findings]}
+    if args.json:
+        print(json.dumps(payload, ensure_ascii=False, indent=2))
+    else:
+        print(f"REVIEW SESSION: {session.session_id} (base revision {session.base_revision})")
+        print(f"Findings: {len(findings)} — review không thay đổi canonical state.")
+        for item in findings:
+            print(f"  [{item.finding_id}] {item.finding_type} trang {item.page_start}-{item.page_end}: {item.reason}")
+        print("Duyệt bằng review-approve/review-reject/review-manual-fix, rồi chạy repair-plan.")
+    return EXIT_OK
+
+
+def cmd_review_semantic(args: argparse.Namespace) -> int:
+    """Explicit opt-in network/model action; it never applies a repair."""
+    from .semantic_reviewer import OpenAICompatibleSemanticReviewer, PdfToPpmRenderer
+
+    ws, folder, catalog = _workspace(args), Path(args.folder), load_catalog()
+    reviewer = OpenAICompatibleSemanticReviewer(endpoint=args.endpoint, model=args.model,
+        api_key_env=args.api_key_env, timeout_seconds=args.timeout)
+    with StateRegistry(ws.state_db_path) as registry:
+        session, findings = run_semantic_review(registry, folder.name, catalog=catalog, folder=folder,
+            output_dir=ws.output / folder.name, review_dir=ws.review / folder.name, reviewer=reviewer,
+            renderer=PdfToPpmRenderer(args.renderer), source_hash=args.source_hash, pages=_review_pages(args.pages))
+    payload = {"session": session.__dict__, "findings": [item.__dict__ for item in findings]}
+    print(json.dumps(payload, ensure_ascii=False, indent=2) if args.json else
+          f"SEMANTIC REVIEW SESSION: {session.session_id}; persisted findings: {len(findings)}. Canonical state chưa thay đổi.")
+    return EXIT_OK
+
+
+def cmd_review_findings(args: argparse.Namespace) -> int:
+    ws = _workspace(args)
+    with StateRegistry(ws.state_db_path) as registry:
+        findings = list_findings(registry, args.session_id)
+    if args.json:
+        print(json.dumps([f.__dict__ for f in findings], ensure_ascii=False, indent=2))
+    else:
+        for f in findings:
+            print(f"[{f.finding_id}] {f.status} {f.decision or ''} {f.finding_type} pages={f.page_start}-{f.page_end}")
+            print(f"  {f.reason}")
+    return EXIT_OK
+
+
+def cmd_review_decision(args: argparse.Namespace) -> int:
+    ws = _workspace(args)
+    payload = _manual_payload(args) if args.decision == "MANUAL_FIX" else None
+    with StateRegistry(ws.state_db_path) as registry:
+        finding = decide_finding(registry, args.finding_id, decision=args.decision, reviewer=args.by, manual_fix=payload)
+    print(f"{finding.finding_id}: {finding.decision}. Canonical state chưa thay đổi; hãy tạo repair plan.")
+    return EXIT_OK
+
+
+def cmd_repair_plan(args: argparse.Namespace) -> int:
+    ws = _workspace(args)
+    with StateRegistry(ws.state_db_path) as registry:
+        plan = create_repair_plan(registry, args.session_id)
+    payload = plan.__dict__
+    if args.json:
+        print(json.dumps(payload, ensure_ascii=False, indent=2))
+    else:
+        print(f"REPAIR PLAN: {plan.repair_plan_id}")
+        print(f"Base revision: {plan.base_revision}; approved changes: {len(plan.changes)}")
+        for change in plan.changes:
+            print(f"  {change['finding_type']}: {change['pages']} ({change['decision']})")
+        print("Mặc định repair là dry-run. Chỉ dùng repair <plan_id> --apply sau khi đã kiểm tra plan.")
+    return EXIT_OK
+
+
+def cmd_repair(args: argparse.Namespace) -> int:
+    ws, folder, catalog = _workspace(args), Path(args.folder), load_catalog()
+    with StateRegistry(ws.state_db_path) as registry:
+        result = apply_repair(registry, args.repair_plan_id, catalog=catalog, folder=folder,
+            output_dir=ws.output / folder.name, review_dir=ws.review / folder.name, dry_run=not args.apply)
+    print(json.dumps(result, ensure_ascii=False, indent=2))
+    return EXIT_OK
+
+
+def cmd_review_history(args: argparse.Namespace) -> int:
+    ws, person = _workspace(args), Path(args.folder).name
+    with StateRegistry(ws.state_db_path) as registry:
+        if args.diff:
+            try:
+                before, after = (int(x) for x in args.diff.split(":", 1))
+            except Exception as exc:
+                raise PipelineError("--diff phải có dạng 1:2.") from exc
+            data = revision_diff(registry, person, before, after)
+        else:
+            data = review_history(registry, person)
+    print(json.dumps(data, ensure_ascii=False, indent=2) if args.json or args.diff else "\n".join(
+        f"REV {row['revision']} — {row['kind']}: {row['summary']} ({row['created_at']})" for row in data))
+    return EXIT_OK
+
+
+def cmd_review_export_corrections(args: argparse.Namespace) -> int:
+    ws, person = _workspace(args), Path(args.folder).name
+    with StateRegistry(ws.state_db_path) as registry:
+        target = export_corrections_jsonl(registry, person, Path(args.out))
+    print(f"Đã export correction ledger: {target}")
+    return EXIT_OK
+
+
+def cmd_review_benchmark_fixture(args: argparse.Namespace) -> int:
+    ws = _workspace(args)
+    with StateRegistry(ws.state_db_path) as registry:
+        fixture = benchmark_fixture(registry, args.finding_id)
+    target = Path(args.out)
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_text(json.dumps(fixture, ensure_ascii=False, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    print(f"Đã tạo anonymized benchmark fixture: {target}")
+    return EXIT_OK
+
+
 def cmd_retire_source(args: argparse.Namespace) -> int:
     """Explicit operator transition for a source whose bytes are absent."""
     folder = Path(args.folder)
@@ -463,6 +612,74 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("folder")
     sp.add_argument("--json", action="store_true")
     sp.set_defaults(func=cmd_review_list)
+
+    sp = sub.add_parser("review-case", help="Rà soát kết quả đã xử lý; chỉ tạo findings, không sửa dữ liệu")
+    sp.add_argument("folder", help="input/<TEN_NGUOI>")
+    sp.add_argument("--source-hash", default=None, help="Giới hạn một source SHA-256 đã có trong state")
+    sp.add_argument("--pages", default=None, help="Giới hạn phạm vi trang, ví dụ 18-24")
+    sp.add_argument("--json", action="store_true")
+    sp.set_defaults(func=cmd_review_case)
+
+    sp = sub.add_parser("review-findings", help="Xem findings của một review session")
+    sp.add_argument("session_id")
+    sp.add_argument("--json", action="store_true")
+    sp.set_defaults(func=cmd_review_findings)
+
+    sp = sub.add_parser("review-semantic", help="Semantic review có scope rõ ràng; chỉ tạo proposal, không apply")
+    sp.add_argument("folder", help="input/<TEN_NGUOI>")
+    sp.add_argument("--endpoint", required=True, help="OpenAI-compatible chat-completions endpoint")
+    sp.add_argument("--model", required=True)
+    sp.add_argument("--api-key-env", default="OPENAI_API_KEY", help="Tên biến môi trường chứa API key")
+    sp.add_argument("--timeout", type=int, default=60)
+    sp.add_argument("--renderer", default="pdftoppm", help="Đường dẫn/lệnh Poppler pdftoppm")
+    sp.add_argument("--source-hash", default=None, help="Giới hạn một source SHA-256")
+    sp.add_argument("--pages", default=None, help="Giới hạn phạm vi trang, ví dụ 18-24")
+    sp.add_argument("--json", action="store_true")
+    sp.set_defaults(func=cmd_review_semantic)
+
+    sp = sub.add_parser("review-approve", help="Chấp nhận proposed correction của một finding; chưa apply")
+    sp.add_argument("finding_id")
+    sp.add_argument("--by", default="operator")
+    sp.set_defaults(func=cmd_review_decision, decision="ACCEPT")
+
+    sp = sub.add_parser("review-reject", help="Giữ canonical result hiện có cho một finding")
+    sp.add_argument("finding_id")
+    sp.add_argument("--by", default="operator")
+    sp.set_defaults(func=cmd_review_decision, decision="KEEP_EXISTING")
+
+    sp = sub.add_parser("review-manual-fix", help="Nhập correction JSON có cấu trúc; chưa apply")
+    sp.add_argument("finding_id")
+    sp.add_argument("--payload", default=None, help="JSON correction; ví dụ {\"type_id\":\"07\"}")
+    sp.add_argument("--payload-file", default=None, help="File JSON correction")
+    sp.add_argument("--by", default="operator")
+    sp.set_defaults(func=cmd_review_decision, decision="MANUAL_FIX")
+
+    sp = sub.add_parser("repair-plan", help="Tạo repair plan từ các finding đã ACCEPT/MANUAL_FIX")
+    sp.add_argument("session_id")
+    sp.add_argument("--json", action="store_true")
+    sp.set_defaults(func=cmd_repair_plan)
+
+    sp = sub.add_parser("repair", help="Thực thi targeted repair từ plan (mặc định dry-run)")
+    sp.add_argument("repair_plan_id")
+    sp.add_argument("folder", help="input/<TEN_NGUOI>")
+    sp.add_argument("--apply", action="store_true", help="Tạo revision mới và cập nhật artifacts đã duyệt")
+    sp.set_defaults(func=cmd_repair)
+
+    sp = sub.add_parser("review-history", help="Xem revision history hoặc diff của một hồ sơ")
+    sp.add_argument("folder")
+    sp.add_argument("--diff", default=None, help="So sánh revision, ví dụ 1:2")
+    sp.add_argument("--json", action="store_true")
+    sp.set_defaults(func=cmd_review_history)
+
+    sp = sub.add_parser("review-export-corrections", help="Xuất correction ledger JSONL cho audit/benchmark")
+    sp.add_argument("folder")
+    sp.add_argument("--out", required=True, help="Đường dẫn JSONL đích")
+    sp.set_defaults(func=cmd_review_export_corrections)
+
+    sp = sub.add_parser("review-benchmark-fixture", help="Tạo fixture metadata anonymized từ finding đã xác nhận")
+    sp.add_argument("finding_id")
+    sp.add_argument("--out", required=True, help="Đường dẫn JSON fixture đích (không chứa PDF thật)")
+    sp.set_defaults(func=cmd_review_benchmark_fixture)
 
     sp = sub.add_parser("resolve-review", help="Chốt một logical document REVIEW_PENDING (không đọc lại PDF)")
     sp.add_argument("logical_document_id")

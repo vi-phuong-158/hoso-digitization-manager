@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -20,10 +21,13 @@ class Settings:
     ignore_patterns: list[str] = field(default_factory=lambda: ["Thumbs.db", ".DS_Store", "~$*"])
     manifest_path: Path | None = None
     ledger_path: Path | None = None
+    semantic_endpoint: str | None = None
+    semantic_model: str | None = None
+    semantic_api_key_env: str = "OPENAI_API_KEY"
 
     @classmethod
     def from_file(cls, path: str | Path | None = None) -> "Settings":
-        config_path = Path(path) if path else None
+        config_path = Path(path) if path else (Path(os.environ["HOSO_MANAGER_CONFIG"]) if os.environ.get("HOSO_MANAGER_CONFIG") else None)
         raw: dict[str, Any] = {}
         if config_path and config_path.is_file():
             raw = json.loads(config_path.read_text(encoding="utf-8"))
@@ -36,9 +40,11 @@ class Settings:
             return candidate if candidate.is_absolute() else (base / candidate).resolve()
 
         integration = raw.get("integration") or {}
+        default_root = Path(os.environ.get("HOSO_MANAGER_DATA_ROOT", str(REPO_ROOT / "input")))
+        default_db = Path(os.environ.get("HOSO_MANAGER_DATABASE_PATH", str(REPO_ROOT / "data" / "manager.db")))
         return cls(
-            data_root=resolve(raw.get("data_root"), REPO_ROOT / "input") or REPO_ROOT / "input",
-            database_path=resolve(raw.get("database_path"), REPO_ROOT / "data" / "manager.db") or REPO_ROOT / "data" / "manager.db",
+            data_root=resolve(raw.get("data_root"), default_root) or default_root,
+            database_path=resolve(raw.get("database_path"), default_db) or default_db,
             config_path=config_path,
             host=str(raw.get("host", "127.0.0.1")),
             port=int(raw.get("port", 8765)),
@@ -46,6 +52,9 @@ class Settings:
             ignore_patterns=list(raw.get("ignore_patterns") or ["Thumbs.db", ".DS_Store", "~$*"]),
             manifest_path=resolve(integration.get("manifest_path")),
             ledger_path=resolve(integration.get("ledger_path")),
+            semantic_endpoint=str((raw.get("semantic_review") or {}).get("endpoint") or "") or None,
+            semantic_model=str((raw.get("semantic_review") or {}).get("model") or "") or None,
+            semantic_api_key_env=str((raw.get("semantic_review") or {}).get("api_key_env") or "OPENAI_API_KEY"),
         )
 
     def validate(self) -> None:
@@ -67,6 +76,11 @@ class Settings:
             "integration": {
                 "manifest_path": str(self.manifest_path) if self.manifest_path else None,
                 "ledger_path": str(self.ledger_path) if self.ledger_path else None,
+            },
+            "semantic_review": {
+                "endpoint": self.semantic_endpoint,
+                "model": self.semantic_model,
+                "api_key_env": self.semantic_api_key_env,
             },
         }
 

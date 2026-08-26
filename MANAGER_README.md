@@ -16,3 +16,11 @@ cấu hình `config.json` cạnh `HosoManager.exe`.
 Manager tái sử dụng `document_types.json`, scanner/pipeline artifacts hiện hữu
 và đọc manifest/ledger theo cấu hình. Khi không có artifact integration, nó
 chạy bằng filesystem fallback.
+
+Mục `Rà soát hồ sơ` dùng pipeline state cùng workspace (nếu có) để bắt đầu
+deterministic audit, semantic review đã cấu hình, xem findings,
+giữ/chấp nhận/chỉnh thủ công quyết định và tạo/apply repair plan. Semantic
+review chỉ hoạt động khi local config có `semantic_review.endpoint` và
+`semantic_review.model`; credential chỉ nằm trong named environment variable,
+không ở config/database. Nút Apply luôn hiển thị cảnh báo: chỉ thay đổi đã
+duyệt được áp dụng, PDF nguồn không đổi và một revision mới sẽ được tạo.

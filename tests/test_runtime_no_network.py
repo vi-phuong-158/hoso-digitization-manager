@@ -16,7 +16,9 @@ from app.pipeline import Workspace, process_person_folder
 from app.vision_adapter import ProviderError, available_providers, get_provider
 
 # Module duy nhất được phép nhắc tới SDK model; nó KHÔNG nằm trong runtime path.
-QUARANTINED = {"gemini_provider.py"}
+# Explicit operator-only adapters; never imported by the normal offline
+# pipeline/provider registry and therefore tested separately.
+QUARANTINED = {"gemini_provider.py", "semantic_reviewer.py"}
 
 NETWORK_MODULES = {
     "requests",

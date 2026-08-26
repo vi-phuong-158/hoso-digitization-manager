@@ -135,6 +135,37 @@ def test_execute_that_bai_khong_lam_mat_file_cu(dirs):
     assert (out / "C.pdf").read_bytes() == b"CCC"
 
 
+def test_execute_rename_fault_mid_permutation_rolls_back_and_retries(dirs, monkeypatch):
+    """A failure after temporary staging restores every canonical filename."""
+    out, rev = dirs
+    (out / "A.pdf").write_bytes(b"AAA")
+    (out / "B.pdf").write_bytes(b"BBB")
+    from app.global_naming import RenameOp
+
+    ops = [
+        RenameOp("x1", "MOVE", "A.pdf", "output", "B.pdf", "output"),
+        RenameOp("x2", "MOVE", "B.pdf", "output", "A.pdf", "output"),
+    ]
+    real_rename = Path.rename
+
+    def interrupted(path: Path, target):
+        if path.parent.name == ".rename_tmp" and Path(target).name == "A.pdf":
+            raise OSError("injected finalize failure")
+        return real_rename(path, target)
+
+    monkeypatch.setattr(Path, "rename", interrupted)
+    with pytest.raises(PipelineError, match="rollback"):
+        execute_rename_plan(out, rev, ops, source_path_of={}, pages_of={})
+    assert (out / "A.pdf").read_bytes() == b"AAA"
+    assert (out / "B.pdf").read_bytes() == b"BBB"
+    assert not list((out / ".rename_tmp").glob("*.pdf"))
+
+    monkeypatch.undo()
+    execute_rename_plan(out, rev, ops, source_path_of={}, pages_of={})
+    assert (out / "A.pdf").read_bytes() == b"BBB"
+    assert (out / "B.pdf").read_bytes() == b"AAA"
+
+
 def test_execute_tao_moi_tu_pdf_nguon(dirs, hai_folder: Path):
     out, rev = dirs
     from app.global_naming import RenameOp

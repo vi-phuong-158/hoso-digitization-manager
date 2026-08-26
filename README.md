@@ -43,6 +43,10 @@ input/<người>/*.pdf
 | `app/policy.py` | DEV POLICY CLOSURE: type 87 subtype, SUPPORTING_DOCUMENT, DUPLICATE, partial date precision (DAY/MONTH/YEAR) |
 | `app/policy_rehearsal.py` | Rehearsal thuần dữ liệu (đọc manifest/analysis đã freeze) — preview AUTO/REVIEW trước/sau khi áp policy, không mutate state |
 | `app/review.py` | `review-list`/`resolve-review` — người vận hành chốt REVIEW (TAXONOMY/SUPPORTING/DUPLICATE/ngày) không cần Agent đọc lại PDF |
+| `app/review_repair.py` | Audit kết quả đã xử lý, session/finding/decision, repair plan targeted, revision và correction ledger |
+| `app/semantic_reviewer.py` | Adapter semantic review explicit ngoài offline runtime path; render scope tạm thời và chỉ tạo proposal đã validate |
+| `app/semantic_reviewer.py` | Adapter semantic review explicit ngoài offline runtime path; render scope tạm thời và chỉ tạo proposal đã validate |
+| `app/semantic_reviewer.py` | Adapter semantic review explicit, ngoài offline runtime path; render scope tạm thời và chỉ tạo proposal đã validate |
 | `app/reconcile.py` | Đối chiếu state DB với file thật trên đĩa (`reconcile`), chỉ báo cáo |
 | `app/state_import.py` | Migration: nạp PROCESSED từ manifest/output đã có sẵn (`import-state`) |
 | `app/cli.py` | CLI |
@@ -121,6 +125,8 @@ Thêm provider mới = thêm một file trong `app/providers/` và gọi `regist
 ```bash
 python -m pytest tests -q
 ```
+
+Review & Repair (không tự apply): xem [docs/review-repair-pipeline.md](docs/review-repair-pipeline.md).
 
 ```bash
 python -m app.cli test-golden --provider agent

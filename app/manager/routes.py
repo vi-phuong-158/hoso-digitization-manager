@@ -15,6 +15,12 @@ from .integration import ensure_schema, integrate_case, provider_for
 from .scanner import ScanService
 from .status import mark_complete, now as status_now, recompute_case, reopen, set_checklist_override, set_manual_status, update_note
 from .taxonomy import TaxonomyAdapter
+from app.catalog import load_catalog
+from app.review_repair import (
+    apply_repair, create_repair_plan, decide_finding, get_repair_plan,
+    list_findings, run_semantic_review, sessions_for_person, start_review,
+)
+from app.state import StateRegistry
 
 
 def _json_requested(request: Request) -> bool:
@@ -73,6 +79,10 @@ def register_routes(app, cfg: Settings, db: Database, templates: Jinja2Templates
     ensure_schema(db)
     integration_provider = provider_for(cfg, taxonomy)
 
+    def review_roots() -> tuple[Path, Path, Path]:
+        root = cfg.data_root.parent
+        return root / "state" / "processing_state.db", root / "output", root / "review"
+
     @app.get("/cases")
     def cases(request: Request, q: str = "", status: str = "", unit: str = "", warning: int = 0, missing_p1: int = 0, page: int = 1, sort: str = "updated"):
         page = max(page, 1)
@@ -98,6 +108,126 @@ def register_routes(app, cfg: Settings, db: Database, templates: Jinja2Templates
         if _json_requested(request):
             return {"items": rows, "page": page, "count": len(rows)}
         return templates.TemplateResponse(request=request, name="cases.html", context=context)
+
+    @app.get("/reviews")
+    def reviews(request: Request):
+        state_db, _, _ = review_roots()
+        rows = [dict(row) for row in db.all("SELECT id,folder_name,person_name_display,effective_status FROM cases WHERE is_present=1 ORDER BY folder_name")]
+        if not state_db.is_file():
+            context = {"rows": rows, "state_available": False, "session_counts": {}}
+        else:
+            with StateRegistry(state_db) as registry:
+                context = {"rows": rows, "state_available": True,
+                    "session_counts": {row["folder_name"]: len(sessions_for_person(registry, row["folder_name"])) for row in rows}}
+        if _json_requested(request):
+            return context
+        return templates.TemplateResponse(request=request, name="reviews.html", context=context)
+
+    @app.get("/reviews/{case_id}")
+    def review_case_detail(request: Request, case_id: int):
+        try:
+            payload = _case_payload(db, case_id)
+        except LookupError as exc:
+            return JSONResponse({"detail": str(exc)}, status_code=404)
+        state_db, output_root, review_root = review_roots()
+        if not state_db.is_file():
+            payload.update({"state_available": False, "sessions": [], "findings": []})
+        else:
+            with StateRegistry(state_db) as registry:
+                sessions = sessions_for_person(registry, payload["case"]["folder_name"])
+                latest = sessions[0] if sessions else None
+                payload.update({"state_available": True, "sessions": [s.__dict__ for s in sessions],
+                    "findings": [f.__dict__ for f in list_findings(registry, latest.session_id)] if latest else [],
+                    "output_dir": str(output_root / payload["case"]["folder_name"]), "review_dir": str(review_root / payload["case"]["folder_name"])})
+        if _json_requested(request):
+            return payload
+        return templates.TemplateResponse(request=request, name="review_case.html", context=payload)
+
+    @app.post("/reviews/{case_id}/start")
+    def review_start(request: Request, case_id: int):
+        if not _csrf_valid(request):
+            return JSONResponse({"detail": "CSRF token không hợp lệ"}, status_code=403)
+        case = db.one("SELECT folder_name,folder_path FROM cases WHERE id=? AND is_present=1", (case_id,))
+        if case is None:
+            return JSONResponse({"detail": "Không tìm thấy hồ sơ"}, status_code=404)
+        state_db, output_root, review_root = review_roots()
+        if not state_db.is_file():
+            return JSONResponse({"detail": "Chưa có pipeline state; hãy xử lý hồ sơ bằng pipeline trước."}, status_code=409)
+        with StateRegistry(state_db) as registry:
+            session, _ = start_review(registry, case["folder_name"], catalog=load_catalog(),
+                output_dir=output_root / case["folder_name"], review_dir=review_root / case["folder_name"])
+        return {"ok": True, "session_id": session.session_id, "message": "Review chỉ tạo findings; chưa thay đổi canonical state."}
+
+    @app.post("/reviews/{case_id}/start-semantic")
+    def review_start_semantic(request: Request, case_id: int):
+        if not _csrf_valid(request):
+            return JSONResponse({"detail": "CSRF token không hợp lệ"}, status_code=403)
+        if not cfg.semantic_endpoint or not cfg.semantic_model:
+            return JSONResponse({"detail": "Semantic review chưa được cấu hình endpoint/model; không có fallback tự động."}, status_code=409)
+        case = db.one("SELECT folder_name,folder_path FROM cases WHERE id=? AND is_present=1", (case_id,))
+        if case is None:
+            return JSONResponse({"detail": "Không tìm thấy hồ sơ"}, status_code=404)
+        state_db, output_root, review_root = review_roots()
+        if not state_db.is_file():
+            return JSONResponse({"detail": "Chưa có pipeline state; hãy xử lý hồ sơ bằng pipeline trước."}, status_code=409)
+        from app.semantic_reviewer import OpenAICompatibleSemanticReviewer, PdfToPpmRenderer
+        try:
+            with StateRegistry(state_db) as registry:
+                session, findings = run_semantic_review(registry, case["folder_name"], catalog=load_catalog(),
+                    folder=Path(case["folder_path"]), output_dir=output_root / case["folder_name"],
+                    review_dir=review_root / case["folder_name"],
+                    reviewer=OpenAICompatibleSemanticReviewer(endpoint=cfg.semantic_endpoint, model=cfg.semantic_model,
+                        api_key_env=cfg.semantic_api_key_env), renderer=PdfToPpmRenderer())
+            return {"ok": True, "session_id": session.session_id, "findings": len(findings), "message": "Semantic review chỉ tạo proposal; chưa thay đổi canonical state."}
+        except PipelineError as exc:
+            return JSONResponse({"detail": str(exc)}, status_code=409)
+
+    @app.post("/reviews/findings/{finding_id}/decision")
+    async def review_decision(request: Request, finding_id: str):
+        if not _csrf_valid(request):
+            return JSONResponse({"detail": "CSRF token không hợp lệ"}, status_code=403)
+        payload = await _payload(request)
+        state_db, _, _ = review_roots()
+        if not state_db.is_file():
+            return JSONResponse({"detail": "Không có pipeline state"}, status_code=409)
+        try:
+            with StateRegistry(state_db) as registry:
+                finding = decide_finding(registry, finding_id, decision=payload.get("decision", ""),
+                    reviewer=payload.get("reviewer") or "operator", manual_fix=payload.get("manual_fix"))
+            return {"ok": True, "finding": finding.__dict__}
+        except PipelineError as exc:
+            return JSONResponse({"detail": str(exc)}, status_code=400)
+
+    @app.post("/reviews/{case_id}/repair-plan")
+    async def review_repair_plan(request: Request, case_id: int):
+        if not _csrf_valid(request):
+            return JSONResponse({"detail": "CSRF token không hợp lệ"}, status_code=403)
+        payload = await _payload(request)
+        state_db, _, _ = review_roots()
+        try:
+            with StateRegistry(state_db) as registry:
+                plan = create_repair_plan(registry, payload.get("session_id", ""))
+            return {"ok": True, "plan": plan.__dict__}
+        except PipelineError as exc:
+            return JSONResponse({"detail": str(exc)}, status_code=400)
+
+    @app.post("/reviews/{case_id}/repair/{plan_id}")
+    async def review_repair(request: Request, case_id: int, plan_id: str):
+        if not _csrf_valid(request):
+            return JSONResponse({"detail": "CSRF token không hợp lệ"}, status_code=403)
+        payload = await _payload(request)
+        case = db.one("SELECT folder_name,folder_path FROM cases WHERE id=? AND is_present=1", (case_id,))
+        if case is None:
+            return JSONResponse({"detail": "Không tìm thấy hồ sơ"}, status_code=404)
+        state_db, output_root, review_root = review_roots()
+        try:
+            with StateRegistry(state_db) as registry:
+                result = apply_repair(registry, plan_id, catalog=load_catalog(), folder=Path(case["folder_path"]),
+                    output_dir=output_root / case["folder_name"], review_dir=review_root / case["folder_name"],
+                    dry_run=not bool(payload.get("apply")))
+            return result
+        except PipelineError as exc:
+            return JSONResponse({"detail": str(exc)}, status_code=409)
 
     @app.get("/cases/{case_id}")
     def case_detail(request: Request, case_id: int):

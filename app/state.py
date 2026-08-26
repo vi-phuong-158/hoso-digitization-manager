@@ -39,7 +39,7 @@ from .policy import (
 )
 
 DB_FILENAME = "processing_state.db"
-STATE_SCHEMA_VERSION = 3
+STATE_SCHEMA_VERSION = 5
 
 STATUS_PROCESSING = "PROCESSING"
 STATUS_ANALYZED_PENDING_APPLY = "ANALYZED_PENDING_APPLY"
@@ -349,6 +349,62 @@ class StateRegistry:
             self._conn.execute(
                 "CREATE TABLE IF NOT EXISTS state_schema (key TEXT PRIMARY KEY, value TEXT NOT NULL)"
             )
+            # Review/repair metadata lives in this same local state DB.  It
+            # never stores PDF bytes or OCR/full-text payloads.
+            self._conn.execute("""
+                CREATE TABLE IF NOT EXISTS review_sessions (
+                    session_id TEXT PRIMARY KEY, person_folder TEXT NOT NULL,
+                    scope_json TEXT NOT NULL, base_revision INTEGER NOT NULL,
+                    review_method TEXT NOT NULL, model_metadata_json TEXT NOT NULL,
+                    finding_count INTEGER NOT NULL DEFAULT 0, review_status TEXT NOT NULL,
+                    repair_status TEXT NOT NULL, result_revision INTEGER,
+                    created_at TEXT NOT NULL, completed_at TEXT
+                )
+            """)
+            self._conn.execute("""
+                CREATE TABLE IF NOT EXISTS review_findings (
+                    finding_id TEXT PRIMARY KEY,
+                    session_id TEXT NOT NULL REFERENCES review_sessions(session_id),
+                    source_hash TEXT, page_start INTEGER, page_end INTEGER,
+                    finding_type TEXT NOT NULL, severity TEXT NOT NULL,
+                    existing_result_json TEXT NOT NULL, proposed_result_json TEXT NOT NULL,
+                    reason TEXT NOT NULL, confidence REAL NOT NULL, status TEXT NOT NULL,
+                    decision TEXT, decision_payload_json TEXT, reviewed_by TEXT,
+                    reviewed_at TEXT, evidence_json TEXT, fingerprint TEXT,
+                    reviewer_version TEXT, created_at TEXT NOT NULL
+                )
+            """)
+            self._conn.execute("CREATE INDEX IF NOT EXISTS idx_review_findings_session ON review_findings(session_id)")
+            self._conn.execute("CREATE INDEX IF NOT EXISTS idx_review_findings_suppression ON review_findings(fingerprint, reviewer_version, decision)")
+            self._conn.execute("""
+                CREATE TABLE IF NOT EXISTS case_revisions (
+                    person_folder TEXT NOT NULL, revision INTEGER NOT NULL,
+                    parent_revision INTEGER, kind TEXT NOT NULL, summary TEXT NOT NULL,
+                    snapshot_json TEXT NOT NULL, created_by TEXT NOT NULL,
+                    created_at TEXT NOT NULL, PRIMARY KEY(person_folder, revision)
+                )
+            """)
+            self._conn.execute("""
+                CREATE TABLE IF NOT EXISTS repair_plans (
+                    repair_plan_id TEXT PRIMARY KEY,
+                    session_id TEXT NOT NULL REFERENCES review_sessions(session_id),
+                    person_folder TEXT NOT NULL, base_revision INTEGER NOT NULL,
+                    plan_json TEXT NOT NULL, status TEXT NOT NULL, created_at TEXT NOT NULL,
+                    applied_at TEXT, result_revision INTEGER
+                )
+            """)
+            self._conn.execute("""
+                CREATE TABLE IF NOT EXISTS correction_ledger (
+                    correction_id TEXT PRIMARY KEY,
+                    repair_plan_id TEXT NOT NULL REFERENCES repair_plans(repair_plan_id),
+                    finding_id TEXT NOT NULL REFERENCES review_findings(finding_id),
+                    person_folder TEXT NOT NULL, source_hash TEXT,
+                    source_pages_json TEXT NOT NULL, finding_type TEXT NOT NULL,
+                    old_result_json TEXT NOT NULL, new_result_json TEXT NOT NULL,
+                    decision TEXT NOT NULL, reviewer TEXT NOT NULL, created_at TEXT NOT NULL,
+                    UNIQUE(repair_plan_id, finding_id)
+                )
+            """)
 
     # Cột thêm sau bản gốc (Phase 30 - DEV POLICY CLOSURE). ALTER TABLE ADD COLUMN
     # thay vì CREATE lại, để không đụng dữ liệu sẵn có (section 14: migration
@@ -361,6 +417,11 @@ class StateRegistry:
         ("resolved_classification_kind", "TEXT"),
         ("resolved_subtype", "TEXT"),
         ("resolved_date_precision", "TEXT"),
+    )
+    _REVIEW_FINDING_NEW_COLUMNS: tuple[tuple[str, str], ...] = (
+        ("evidence_json", "TEXT"),
+        ("fingerprint", "TEXT"),
+        ("reviewer_version", "TEXT"),
     )
 
     def _migrate_schema(self) -> None:
@@ -375,6 +436,13 @@ class StateRegistry:
             for name, decl in self._LOGICAL_DOC_NEW_COLUMNS:
                 if name not in existing:
                     self._conn.execute(f"ALTER TABLE logical_documents ADD COLUMN {name} {decl}")
+            review_columns = {
+                r["name"] for r in self._conn.execute("PRAGMA table_info(review_findings)").fetchall()
+            }
+            for name, decl in self._REVIEW_FINDING_NEW_COLUMNS:
+                if name not in review_columns:
+                    self._conn.execute(f"ALTER TABLE review_findings ADD COLUMN {name} {decl}")
+            self._conn.execute("CREATE INDEX IF NOT EXISTS idx_review_findings_suppression ON review_findings(fingerprint, reviewer_version, decision)")
             self._conn.execute(
                 "INSERT INTO state_schema(key, value) VALUES ('version', ?) "
                 "ON CONFLICT(key) DO UPDATE SET value=excluded.value",

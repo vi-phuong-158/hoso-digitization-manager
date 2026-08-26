@@ -97,3 +97,34 @@
 - Gate limitation: the real corpus has only 2 cases, so the required minimum-20 manual spot-check cannot be completed honestly. Package double-launch hidden-process observation was not deterministic on this runner; lock unit coverage passes.
 - Git provenance remains unresolved: no `.git` metadata exists in the workspace or nearby parents, so phase commits cannot be created.
 - Gate: `DIGITIZATION_MANAGER_REAL_DATA_PILOT_PARTIAL`.
+# Review & Repair pipeline — 2026-08-26
+
+- Inventory: canonical incremental state là `state/processing_state.db`; manifest
+  ở `output/<người>/_manifest.json`; global naming có rename plan hai pha; Manager
+  là FastAPI/Jinja local. Không tạo state store mới.
+- Thêm migration schema v5: review sessions/findings, repair plans, revisions và
+  correction ledger metadata-only.
+- Thêm deterministic audit, optional semantic finding intake không có quyền
+  mutation, ACCEPT/KEEP_EXISTING/MANUAL_FIX, dry-run repair, stale-base/idempotent
+  guard, history/diff và anonymized benchmark/correction exports.
+- Thêm CLI review/repair và Manager section `Rà soát hồ sơ` với safety banner.
+- Bổ sung semantic-review adapter explicit (OpenAI-compatible, provider/model/env
+  configurable) với PNG scope renderer `pdftoppm`, prompt versioned, output
+  validator fail-closed, evidence/fingerprint/reviewer-version và KEEP_EXISTING
+  suppression có điều kiện. Adapter không thuộc offline runtime pipeline.
+- Bổ sung executable repair coverage cho merge/split/add missing/remove extra,
+  duplicate, filename và legacy page-order; giữ source hash không đổi.
+- Validation hiện tại: `tests/test_review_repair.py` + migration contract = 31
+  passed. Manager review test và Windows build đang PENDING vì local `.venv`
+  thiếu FastAPI/PyInstaller; cài `requirements.txt` bị policy chặn do cần xác
+  nhận trực tiếp từ người vận hành.
+- Rehearsal thực hiện trên bản clone tạm có hash source/state đối chiếu, copy
+  output/review tối thiểu, rồi deterministic audit → ACCEPT một WRONG_FILENAME
+  → plan → dry-run → apply → reconcile → history/diff. Clone tạo revision 2,
+  source hashes không đổi và production input/state không bị ghi; clone nhạy
+  cảm được xóa ngay. Filename rename có thể chạm naming dependency closure để
+  tránh collision, không reprocess các trang ngoài scope.
+- Rehearsal thực tế (review + repair dry-run, không apply) bị chặn trước khi tạo
+  session vì `state/processing_state.db` trong workspace hiện chỉ-đọc. Không có
+  source/output/manifest canonical nào bị thay đổi; cần quyền ghi state hoặc một
+  runtime workspace writable để hoàn tất gate này.
