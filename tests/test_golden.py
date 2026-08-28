@@ -20,12 +20,13 @@ def test_co_it_nhat_mot_file_golden(golden_root: Path):
 @pytest.mark.parametrize("provider", ["fixture", "agent"])
 def test_golden_acceptance(golden_path: Path, provider: str, golden_root: Path):
     """Golden phải xanh với CẢ fixture (test) lẫn agent (runtime Antigravity thật)."""
-    report = run_golden_file(golden_path, root=golden_root, provider_name=provider)
+    provider_config = {"analysis_root": str(golden_root / "analysis")} if provider == "agent" else {"fixture_root": str(golden_root / "fixtures" / "vision")}
+    report = run_golden_file(golden_path, root=golden_root, provider_name=provider, provider_config=provider_config)
     assert report.passed, f"provider={provider}\n" + "\n".join(str(f) for f in report.failures)
 
 
 def test_agent_va_fixture_cho_cung_ket_qua_segmentation(golden_root: Path):
-    a = run_golden_file(list_golden_files(golden_root)[0], root=golden_root, provider_name="agent")
+    a = run_golden_file(list_golden_files(golden_root)[0], root=golden_root, provider_name="agent", provider_config={"analysis_root": str(golden_root / "analysis")})
     f = run_golden_file(list_golden_files(golden_root)[0], root=golden_root, provider_name="fixture")
     assert a.result is not None and f.result is not None
     pages_a = sorted((d.document.source_file, tuple(d.document.source_pages)) for d in a.result.documents)

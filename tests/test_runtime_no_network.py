@@ -12,6 +12,7 @@ from pathlib import Path
 
 import pytest
 
+from app.golden_fixtures import stage_golden_workspace
 from app.pipeline import Workspace, process_person_folder
 from app.vision_adapter import ProviderError, available_providers, get_provider
 
@@ -132,21 +133,24 @@ def test_provider_goi_api_khong_ton_tai_trong_runtime():
 
 
 def test_pipeline_chay_duoc_khi_khong_co_bien_moi_truong_api(
-    monkeypatch, tmp_path: Path, hai_folder: Path
+    monkeypatch, tmp_path: Path, repo_root: Path
 ):
     """Xoá sạch mọi biến môi trường dạng API key -> pipeline vẫn phải chạy."""
     for key in list(os.environ):
         if any(h in key.upper() for h in ("API_KEY", "TOKEN", "SECRET", "GEMINI", "OPENAI")):
             monkeypatch.delenv(key, raising=False)
+    staged = stage_golden_workspace(repo_root, tmp_path / "golden")
     result = process_person_folder(
-        hai_folder, provider_name="agent", workspace=Workspace(tmp_path), write_manifest=False
+        staged.person_folder, provider_name="agent",
+        provider_config={"analysis_root": str(staged.analysis_root)},
+        workspace=Workspace(staged.root), write_manifest=False
     )
     assert result.qc.passed
     assert result.manifest["provider"]["api_key_required"] is False
     assert result.manifest["provider"]["network"] == "none"
 
 
-def test_pipeline_khong_mo_ket_noi_mang(monkeypatch, tmp_path: Path, hai_folder: Path):
+def test_pipeline_khong_mo_ket_noi_mang(monkeypatch, tmp_path: Path, repo_root: Path):
     """Chặn socket ở tầng thấp nhất: chạm vào mạng là test đỏ."""
     calls: list[str] = []
 
@@ -158,8 +162,11 @@ def test_pipeline_khong_mo_ket_noi_mang(monkeypatch, tmp_path: Path, hai_folder:
     monkeypatch.setattr(socket, "create_connection", blocked)
     monkeypatch.setattr(socket, "getaddrinfo", blocked)
 
+    staged = stage_golden_workspace(repo_root, tmp_path / "golden")
     result = process_person_folder(
-        hai_folder, provider_name="agent", workspace=Workspace(tmp_path), write_manifest=False
+        staged.person_folder, provider_name="agent",
+        provider_config={"analysis_root": str(staged.analysis_root)},
+        workspace=Workspace(staged.root), write_manifest=False
     )
     assert result.qc.passed
     assert calls == []

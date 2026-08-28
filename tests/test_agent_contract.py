@@ -248,10 +248,42 @@ def test_ho_so_chua_co_analysis_thi_pipeline_dung_lai(tmp_path: Path, hai_folder
 
 
 # ---------------- đối chiếu chéo segmentation ----------------
-def test_agent_gom_trang_khac_segmenter_thi_sang_review(tmp_path: Path, hai_folder: Path, catalog):
+def _synthetic_agent_analysis(path: Path, person_folder: str) -> dict:
+    data = json.loads(path.read_text(encoding="utf-8"))
+    page_by_number = {row["page_number"]: row for row in data["pages"]}
+    groups: list[list[int]] = []
+    current: list[int] = []
+    for row in data["pages"]:
+        if row.get("starts_new_document") or not current:
+            if current:
+                groups.append(current)
+            current = [row["page_number"]]
+        else:
+            current.append(row["page_number"])
+    if current:
+        groups.append(current)
+    documents = []
+    for pages in groups:
+        first = page_by_number[pages[0]]
+        dated = next((page_by_number[number] for number in pages if page_by_number[number].get("document_date")), first)
+        candidate = (first.get("type_candidates") or [{"type_id": "UNKNOWN", "confidence": 1.0}])[0]
+        documents.append({
+            "source_pages": pages,
+            "type_id": candidate["type_id"],
+            "confidence": candidate["confidence"],
+            "document_date": dated.get("document_date"),
+            "date_confidence": dated.get("date_confidence", 0.0),
+            "title_short": first.get("title_guess"),
+            "needs_review": False,
+            "review_reason": None,
+        })
+    data.update({"person_folder": person_folder, "page_count": len(data["pages"]), "documents": documents})
+    return data
+def test_agent_gom_trang_khac_segmenter_thi_sang_review(tmp_path: Path, hai_folder: Path, catalog, repo_root: Path):
     """Agent tách bìa ra khỏi văn bằng -> lệch segmenter local -> REVIEW."""
-    src = Path("analysis/Nguyễn Hữu Hải/Bang cap cua HAI.json")
-    data = json.loads(src.read_text(encoding="utf-8"))
+    fixture_analysis = repo_root / "fixtures" / "vision" / hai_folder.name
+    src = fixture_analysis / "Bang cap cua HAI.json"
+    data = _synthetic_agent_analysis(src, hai_folder.name)
     # Tách nhóm [1,2] thành [1] và [2].
     data["documents"] = [
         {**data["documents"][0], "source_pages": [1]},
@@ -264,10 +296,7 @@ def test_agent_gom_trang_khac_segmenter_thi_sang_review(tmp_path: Path, hai_fold
         json.dumps(data, ensure_ascii=False), encoding="utf-8"
     )
     for name in ("Quyet dinh dieu dong HAI", "Phieu bo sung hs dang vien 2020 HAI"):
-        (root / f"{name}.json").write_text(
-            Path(f"analysis/Nguyễn Hữu Hải/{name}.json").read_text(encoding="utf-8"),
-            encoding="utf-8",
-        )
+        (root / f"{name}.json").write_text(json.dumps(_synthetic_agent_analysis(fixture_analysis / f"{name}.json", hai_folder.name), ensure_ascii=False), encoding="utf-8")
 
     result = process_person_folder(
         hai_folder,
@@ -282,8 +311,12 @@ def test_agent_gom_trang_khac_segmenter_thi_sang_review(tmp_path: Path, hai_fold
     assert result.qc.passed  # vẫn phủ 100% trang, không mất trang nào
 
 
-def test_provider_khong_bao_gio_tra_ve_ten_file(catalog, hai_folder: Path):
-    p = AgentAnalysisProvider({"catalog": catalog})
+def test_provider_khong_bao_gio_tra_ve_ten_file(catalog, hai_folder: Path, tmp_path: Path, repo_root: Path):
+    analysis_root = tmp_path / "analysis" / hai_folder.name
+    analysis_root.mkdir(parents=True)
+    fixture = repo_root / "fixtures" / "vision" / hai_folder.name / "Bang cap cua HAI.json"
+    (analysis_root / "Bang cap cua HAI.json").write_text(json.dumps(_synthetic_agent_analysis(fixture, hai_folder.name), ensure_ascii=False), encoding="utf-8")
+    p = AgentAnalysisProvider({"catalog": catalog, "analysis_root": str(tmp_path / "analysis")})
     res = p.classify_document(hai_folder / "Bang cap cua HAI.pdf", [3, 4], [])
     assert not hasattr(res, "target_file")
     assert res.type_id == "86"

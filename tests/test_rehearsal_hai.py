@@ -5,16 +5,33 @@ hay đổi phân tích của Agent, các con số dưới đây sẽ lệch và 
 """
 from __future__ import annotations
 
+import json
+
 import pytest
 
+from app.golden_fixtures import stage_golden_workspace
 from app.pipeline import Workspace, process_person_folder
 
 
 @pytest.fixture(scope="module")
-def rehearsal(tmp_path_factory, hai_folder):
-    ws = Workspace(tmp_path_factory.mktemp("rehearsal"))
+def rehearsal(tmp_path_factory, repo_root):
+    staged = stage_golden_workspace(repo_root, tmp_path_factory.mktemp("rehearsal"))
+    analysis_path = staged.analysis_root / staged.person_folder.name / "Bang cap cua HAI.json"
+    analysis = json.loads(analysis_path.read_text(encoding="utf-8"))
+    rehearsal_dates = {(1, 2): "2010-01-01", (5, 6): "2011-01-01"}
+    for document in analysis["documents"]:
+        key = tuple(document["source_pages"])
+        if key == (17, 18):
+            document["confidence"] = 0.70
+        if document["type_id"] == "86" and key in rehearsal_dates:
+            document["document_date"] = rehearsal_dates[key]
+            document["date_confidence"] = 0.97
+    analysis_path.write_text(json.dumps(analysis, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    ws = Workspace(staged.root)
     return process_person_folder(
-        hai_folder, provider_name="agent", workspace=ws, write_manifest=False
+        staged.person_folder, provider_name="agent",
+        provider_config={"analysis_root": str(staged.analysis_root)},
+        workspace=ws, write_manifest=False
     )
 
 

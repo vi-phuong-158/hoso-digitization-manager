@@ -1,26 +1,22 @@
-# Hồ sơ Digitization Manager
+# HosoManager local
 
-Ứng dụng local/offline nằm trong `app/manager`. Chạy từ repository root:
+HosoManager là ứng dụng Windows chạy local trên `127.0.0.1`. Kho tài liệu mặc định là `done\output`; mỗi thư mục con là một hồ sơ. SQLite chỉ lưu index và metadata, không lưu PDF.
+
+## Chức năng chính
+
+- `Hồ sơ Đảng viên`: quét, tìm kiếm, xem checklist 104 loại và mở thư mục.
+- `Thêm tài liệu`: chọn nhiều JPG/JPEG/PNG/PDF, xem thumbnail, kéo thả, xoay, xóa trang, chọn type từ `document_types.json`, xem tên dự kiến và lưu atomic vào hồ sơ.
+- `Scan / AI`: màn hình riêng cho quét lại kho; không phải fallback của các menu khác.
+- `Rà soát hồ sơ`: giữ nguyên Review & Repair hiện có.
+- `Sao lưu`: tạo bản sao SQLite metadata; để backup đầy đủ, sao chép thêm toàn bộ `done\output`.
+- `Cài đặt`: đổi data root canonical và quét lại.
+
+File được chọn trong luồng manual add chỉ được đọc. Ảnh/PDF staging tạm thời được dọn sau khi lưu hoặc hủy; nguồn không bị rename, move, delete hay overwrite.
+
+## Chạy
 
 ```powershell
-python -m uvicorn app.manager.main:app --host 127.0.0.1 --port 8765
+python -m app.manager.entrypoint
 ```
 
-Mở `http://127.0.0.1:8765/`, vào `Cấu hình` để xem root hiện tại, rồi dùng
-`Quét lại dữ liệu`. Mặc định Manager đọc `input/`, lưu metadata ở
-`data/manager.db`, không lưu binary PDF.
-
-Để build Windows onedir, chạy `./build_manager.ps1`; xem `PACKAGING.md` để
-cấu hình `config.json` cạnh `HosoManager.exe`.
-
-Manager tái sử dụng `document_types.json`, scanner/pipeline artifacts hiện hữu
-và đọc manifest/ledger theo cấu hình. Khi không có artifact integration, nó
-chạy bằng filesystem fallback.
-
-Mục `Rà soát hồ sơ` dùng pipeline state cùng workspace (nếu có) để bắt đầu
-deterministic audit, semantic review đã cấu hình, xem findings,
-giữ/chấp nhận/chỉnh thủ công quyết định và tạo/apply repair plan. Semantic
-review chỉ hoạt động khi local config có `semantic_review.endpoint` và
-`semantic_review.model`; credential chỉ nằm trong named environment variable,
-không ở config/database. Nút Apply luôn hiển thị cảnh báo: chỉ thay đổi đã
-duyệt được áp dụng, PDF nguồn không đổi và một revision mới sẽ được tạo.
+Ứng dụng không cần tài khoản, cloud, API AI hay server ngoài máy.

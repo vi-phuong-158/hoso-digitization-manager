@@ -5,13 +5,14 @@ import os
 import subprocess
 from pathlib import Path
 
-from fastapi import Request
+from fastapi import File, Form, Request, UploadFile
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, RedirectResponse
 from fastapi.templating import Jinja2Templates
 
 from .config import Settings
 from .db import Database
 from .integration import ensure_schema, integrate_case, provider_for
+from .manual_documents import discard, ensure_manual_schema, prepare_uploads, preview_path, save_document, staging_root
 from .scanner import ScanService
 from .status import mark_complete, now as status_now, recompute_case, reopen, set_checklist_override, set_manual_status, update_note
 from .taxonomy import TaxonomyAdapter
@@ -83,6 +84,76 @@ def register_routes(app, cfg: Settings, db: Database, templates: Jinja2Templates
         root = cfg.data_root.parent
         return root / "state" / "processing_state.db", root / "output", root / "review"
 
+    ensure_manual_schema(db)
+
+    @app.get("/add-document")
+    @app.get("/manual")
+    def add_document(request: Request, case_id: int | None = None):
+        rows = [dict(row) for row in db.all("SELECT id,folder_name,person_name_display FROM cases WHERE is_present=1 ORDER BY COALESCE(person_name_display,folder_name)")]
+        context = {"cases": rows, "selected_case_id": case_id, "taxonomy": taxonomy.as_dicts()}
+        if _json_requested(request):
+            return context
+        return templates.TemplateResponse(request=request, name="manual_add.html", context=context)
+
+    @app.post("/manual-documents/prepare")
+    async def manual_prepare(request: Request, case_id: int = Form(...), files: list[UploadFile] = File(...)):
+        if not _csrf_valid(request):
+            return JSONResponse({"detail": "CSRF token không hợp lệ"}, status_code=403)
+        if db.one("SELECT id FROM cases WHERE id=? AND is_present=1", (case_id,)) is None:
+            return JSONResponse({"detail": "Không tìm thấy hồ sơ đích"}, status_code=404)
+        try:
+            return prepare_uploads(staging_root(cfg.database_path), case_id, files)
+        except (OSError, ValueError) as exc:
+            return JSONResponse({"detail": str(exc)}, status_code=400)
+        finally:
+            for upload in files:
+                await upload.close()
+
+    @app.get("/manual-documents/name-preview")
+    def manual_name_preview(case_id: int, type_id: str):
+        case = db.one("SELECT folder_path FROM cases WHERE id=? AND is_present=1", (case_id,))
+        if case is None:
+            return JSONResponse({"detail": "Không tìm thấy hồ sơ đích"}, status_code=404)
+        try:
+            from .manual_documents import _next_filename
+            filename, _ = _next_filename(Path(case["folder_path"]).resolve(), taxonomy, type_id)
+            return {"filename": filename}
+        except (OSError, ValueError) as exc:
+            return JSONResponse({"detail": str(exc)}, status_code=400)
+
+    @app.get("/manual-documents/{token}/preview/{preview_name}")
+    def manual_preview(token: str, preview_name: str):
+        try:
+            return FileResponse(preview_path(staging_root(cfg.database_path), token, preview_name), media_type="image/png")
+        except (OSError, ValueError) as exc:
+            return JSONResponse({"detail": str(exc)}, status_code=404)
+
+    @app.delete("/manual-documents/{token}")
+    async def manual_discard(request: Request, token: str):
+        if not _csrf_valid(request):
+            return JSONResponse({"detail": "CSRF token không hợp lệ"}, status_code=403)
+        try:
+            discard(staging_root(cfg.database_path), token)
+            return {"ok": True}
+        except ValueError as exc:
+            return JSONResponse({"detail": str(exc)}, status_code=400)
+
+    @app.post("/manual-documents/save")
+    async def manual_save(request: Request):
+        if not _csrf_valid(request):
+            return JSONResponse({"detail": "CSRF token không hợp lệ"}, status_code=403)
+        try:
+            payload = await _payload(request)
+            case_id_value = int(payload.get("case_id"))
+            result = save_document(staging_root(cfg.database_path), db, taxonomy, cfg.data_root,
+                case_id_value, str(payload.get("token")), payload.get("pages") or [],
+                str(payload.get("type_id")), str(payload.get("document_date") or "") or None,
+                str(payload.get("note") or "") or None)
+            scanner.scan(case_id_value)
+            _recompute_all(db, case_id_value)
+            return result
+        except (OSError, ValueError, TypeError, IndexError) as exc:
+            return JSONResponse({"detail": str(exc)}, status_code=400)
     @app.get("/cases")
     def cases(request: Request, q: str = "", status: str = "", unit: str = "", warning: int = 0, missing_p1: int = 0, page: int = 1, sort: str = "updated"):
         page = max(page, 1)
@@ -103,6 +174,9 @@ def register_routes(app, cfg: Settings, db: Database, templates: Jinja2Templates
         sql = "SELECT c.* FROM cases c WHERE " + " AND ".join(where) + f" ORDER BY {order} LIMIT 100 OFFSET ?"
         params.append((page - 1) * 100)
         rows = [dict(row) for row in db.all(sql, tuple(params))]
+        for row in rows:
+            row["type_count"] = db.one("SELECT COUNT(DISTINCT taxonomy_code) AS n FROM documents WHERE case_id=? AND is_present=1 AND parse_status='OK' AND taxonomy_code IS NOT NULL", (row["id"],))["n"]
+            row["missing_type_count"] = max(0, len(taxonomy.items) - row["type_count"])
         units = [row["unit_code"] for row in db.all("SELECT DISTINCT unit_code FROM cases WHERE is_present=1 AND unit_code IS NOT NULL ORDER BY unit_code")]
         context = {"rows": rows, "q": q, "status": status, "unit": unit, "warning": warning, "missing_p1": missing_p1, "sort": sort, "units": units}
         if _json_requested(request):
@@ -310,7 +384,21 @@ def register_routes(app, cfg: Settings, db: Database, templates: Jinja2Templates
         _recompute_all(db, case_id)
         return result.as_dict()
 
+    @app.get("/scan")
+    def scan_page(request: Request):
+        if _json_requested(request):
+            return {"available": True, "message": "Scan/AI là công cụ riêng của Manager."}
+        return templates.TemplateResponse(request=request, name="scan.html", context={"settings": cfg})
+
     @app.get("/backup")
+    def backup_page(request: Request):
+        if _json_requested(request):
+            target = cfg.database_path.with_name(cfg.database_path.stem + ".backup.sqlite")
+            db.backup_to(target)
+            return {"ok": True, "path": str(target), "metadata_only": True}
+        return templates.TemplateResponse(request=request, name="backup.html", context={"data_root": cfg.data_root, "database_path": cfg.database_path})
+
+    @app.get("/backup/metadata")
     def backup_metadata():
         target = cfg.database_path.with_name(cfg.database_path.stem + ".backup.sqlite")
         db.backup_to(target)

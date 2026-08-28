@@ -12,7 +12,7 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 
 @dataclass
 class Settings:
-    data_root: Path = REPO_ROOT / "input"
+    data_root: Path = REPO_ROOT / "done" / "output"
     database_path: Path = REPO_ROOT / "data" / "manager.db"
     config_path: Path | None = None
     host: str = "127.0.0.1"
@@ -40,7 +40,7 @@ class Settings:
             return candidate if candidate.is_absolute() else (base / candidate).resolve()
 
         integration = raw.get("integration") or {}
-        default_root = Path(os.environ.get("HOSO_MANAGER_DATA_ROOT", str(REPO_ROOT / "input")))
+        default_root = Path(os.environ.get("HOSO_MANAGER_DATA_ROOT", str(REPO_ROOT / "done" / "output")))
         default_db = Path(os.environ.get("HOSO_MANAGER_DATABASE_PATH", str(REPO_ROOT / "data" / "manager.db")))
         return cls(
             data_root=resolve(raw.get("data_root"), default_root) or default_root,

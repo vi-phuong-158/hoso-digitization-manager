@@ -41,7 +41,7 @@ def main() -> None:
     if config_path.is_file():
         settings = Settings.from_file(config_path)
     else:
-        settings = Settings(data_root=root / "input", database_path=root / "data" / "manager.db", config_path=config_path, open_browser_on_start=True)
+        settings = Settings(data_root=root / "done" / "output", database_path=root / "data" / "manager.db", config_path=config_path, open_browser_on_start=True)
         settings.save(config_path)
     settings.validate()
     instance_lock = acquire_single_instance(root)
